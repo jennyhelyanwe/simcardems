@@ -31,6 +31,9 @@ def setup_EM_model(
     cell_inits: typing.Optional[dolfin.Function] = None,
     mech_state_init: typing.Optional[dolfin.Function] = None,
     state_params: typing.Optional[typing.Dict[str, float]] = None,
+    activation_times=None,
+    celltype_function: typing.Optional[dolfin.Function] = None,
+    iks_scale_function: typing.Optional[dolfin.Function] = None,
 ) -> BaseEMCoupling:
     if config is None:
         config = Config()
@@ -38,6 +41,12 @@ def setup_EM_model(
     if state_params is None:
         state_params = {}
     coupling = cls_EMCoupling(geometry, **state_params)
+
+    cell_params_with_overrides = dict(cell_params or {})
+    if celltype_function is not None:
+        cell_params_with_overrides["celltype"] = celltype_function
+    if iks_scale_function is not None:
+        cell_params_with_overrides["scale_IKs"] = iks_scale_function
 
     cellmodel = ep_model.setup_cell_model(
         cls=cls_CellModel,
@@ -47,15 +56,15 @@ def setup_EM_model(
         popu_factors_file=config.popu_factors_file,
         disease_state=config.disease_state,
         cell_inits=cell_inits,
-        cell_params=cell_params,
+        cell_params=cell_params_with_overrides,
     )
 
-    # Set-up solver and time it
     solver = ep_model.setup_solver(
         coupling=coupling,
         dt=config.dt,
         PCL=config.PCL,
         cellmodel=cellmodel,
+        activation_times=activation_times,
     )
     coupling.register_ep_model(solver)
 
@@ -83,6 +92,9 @@ def setup_EM_model_from_config(
     config: Config,
     geometry: typing.Optional[_geometry.BaseGeometry] = None,
     state_params: typing.Optional[typing.Dict[str, float]] = None,
+    activation_times=None,
+    celltype_function = None,
+    iks_scale_function = None,
 ) -> BaseEMCoupling:
     if geometry is None:
         geometry = _geometry.load_geometry(
@@ -93,11 +105,11 @@ def setup_EM_model_from_config(
     if config.coupling_type == "explicit_ORdmm_Land":
         from .explicit_ORdmm_Land import EMCoupling, CellModel, ActiveModel
     elif config.coupling_type == "fully_coupled_ORdmm_Land":
-        from .fully_coupled_ORdmm_Land import EMCoupling, CellModel, ActiveModel  # type: ignore
+        from .fully_coupled_ORdmm_Land import EMCoupling, CellModel, ActiveModel
     elif config.coupling_type == "pureEP_ORdmm_Land":
-        from .pureEP_ORdmm_Land import EMCoupling, CellModel, ActiveModel  # type: ignore
+        from .pureEP_ORdmm_Land import EMCoupling, CellModel, ActiveModel
     elif config.coupling_type == "fully_coupled_Tor_Land":
-        from .fully_coupled_Tor_Land import EMCoupling, CellModel, ActiveModel  # type: ignore
+        from .fully_coupled_Tor_Land import EMCoupling, CellModel, ActiveModel
     else:
         raise ValueError(f"Invalid coupling type: {config.coupling_type}")
 
@@ -108,6 +120,9 @@ def setup_EM_model_from_config(
         geometry=geometry,
         config=config,
         state_params=state_params,
+        activation_times=activation_times,
+        celltype_function=celltype_function,
+        iks_scale_function = iks_scale_function,
     )
 
 
@@ -120,6 +135,7 @@ class BaseEMCoupling:
     ) -> None:
         logger.debug("Create EM coupling")
         self.geometry = geometry
+        self.stimulus_updater = None
         self.t = t
 
     @property

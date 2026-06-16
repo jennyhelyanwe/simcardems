@@ -486,6 +486,8 @@ class TorLandFull(BaseCellModel):
         HF_scaling_Gto = self._parameters["HF_scaling_Gto"]
         HF_scaling_Gncx = self._parameters["HF_scaling_Gncx"]
         HF_scaling_Pnak = self._parameters["HF_scaling_Pnak"]
+        # Read in cell type for current element
+        celltype = self._parameters["celltype"]
 
         # Init return args
         current = [ufl.zero()] * 1
@@ -514,6 +516,7 @@ class TorLandFull(BaseCellModel):
 
         # Expressions for the INaL component
         GNaL = 0.0075 * scale_INaL * scale_drug_INaL * scale_popu_GNaL * HF_scaling_GNaL
+        GNaL = ufl.conditional(ufl.eq(celltype, 1), GNaL * 0.6, GNaL)
         fINaLp = 1.0 / (1.0 + KmCaMK / CaMKa)
         INaL = (-ENa + v) * ((1.0 - fINaLp) * hL + fINaLp * hLp) * GNaL * mL
 
@@ -523,8 +526,11 @@ class TorLandFull(BaseCellModel):
         i = AiF * iF + AiS * iS
         ip = AiF * iFp + AiS * iSp
         fItop = 1.0 / (1.0 + KmCaMK / CaMKa)
+        Gto_scaled = Gto
+        if celltype in (1, 2):
+            Gto_scaled = Gto_scaled * 2.0
         Ito = (
-            Gto
+            Gto_scaled
             * scale_drug_Ito
             * scale_popu_Gto
             * HF_scaling_Gto
@@ -582,6 +588,10 @@ class TorLandFull(BaseCellModel):
         )
         PhiCaK_i = 1.0 * vffrt * (gamma_ki * ki * ufl.exp(1.0 * vfrt) - gamma_kao * ko) / (-1.0 + ufl.exp(1.0 * vfrt))
         PCa = 0.0001 * scale_ICaL * scale_drug_ICaL * scale_popu_GCaL
+        if celltype == 1:
+            PCa = PCa * 1.2
+        elif celltype == 2:
+            PCa = PCa * 1.8
         PCap = 1.1 * PCa
         PCaNa = 0.00125 * PCa
         PCaK = 0.0003574 * PCa
@@ -622,11 +632,13 @@ class TorLandFull(BaseCellModel):
 
         # Expressions for the IKr component
         GKr = 0.0321 * scale_IKr * scale_drug_IKr * scale_popu_GKr
+        GKr = ufl.conditional(ufl.eq(celltype, 1), GKr * 1.3, ufl.conditional(ufl.eq(celltype, 2), GKr * 0.8, GKr))
         IKr = GKr * ufl.sqrt(ko / 5.0) * kr_o * (-EK + v)
 
         # Expressions for the IKs component
         KsCa = 1.0 + 0.6 / (1.0 + 6.481821026062645e-07 * ufl.elem_pow(1.0 / cai, 1.4))
         GKs = 0.0011 * scale_IKs * scale_drug_IKs * scale_popu_GKs
+        GKs = ufl.conditional(ufl.eq(celltype, 1), GKs * 1.4, GKs)
         IKs = (-EKs + v) * GKs * KsCa * xs1 * xs2
 
         # Expressions for the IK1 components
@@ -636,6 +648,7 @@ class TorLandFull(BaseCellModel):
         )
         K1ss = aK1 / (aK1 + bK1)
         GK1 = 0.6992 * scale_IK1 * scale_drug_IK1 * scale_popu_GK1 * HF_scaling_GK1
+        GK1 = ufl.conditional(ufl.eq(celltype, 1), GK1 * 1.2, ufl.conditional(ufl.eq(celltype, 2), GK1 * 1.3, GK1))
         IK1 = ufl.sqrt(ko / 5.0) * (-EK + v) * GK1 * K1ss
 
         # Expressions for the INaCa_i component
@@ -677,6 +690,7 @@ class TorLandFull(BaseCellModel):
         zna = 1.0
         JncxNa_i = E3_i * k4pp_i - E2_i * k3pp_i + 3.0 * E4_i * k7_i - 3.0 * E1_i * k8_i
         JncxCa_i = E2_i * k2_i - E1_i * k1_i
+        Gncx = ufl.conditional(ufl.eq(celltype, 1), Gncx * 1.1, ufl.conditional(ufl.eq(celltype, 2), Gncx * 1.4, Gncx))
         INaCa_i = (
             Gncx
             * (1.0 - INaCa_fractionSS)
@@ -722,6 +736,10 @@ class TorLandFull(BaseCellModel):
         allo_ss = 1.0 / (1.0 + ufl.elem_pow(KmCaAct / cass, 2.0))
         JncxNa_ss = E3_ss * k4pp - E2_ss * k3pp + 3.0 * E4_ss * k7 - 3.0 * E1_ss * k8
         JncxCa_ss = E2_ss * k2 - E1_ss * k1
+        if celltype == 1:
+            Gncx = Gncx * 1.1
+        elif celltype == 2:
+            Gncx = Gncx * 1.4
         INaCa_ss = (
             Gncx * INaCa_fractionSS * scale_popu_KNCX * HF_scaling_Gncx * (zca * JncxCa_ss + zna * JncxNa_ss) * allo_ss
         )
@@ -764,6 +782,7 @@ class TorLandFull(BaseCellModel):
         E4 = x4 / (x1 + x2 + x3 + x4)
         JnakNa = 3.0 * E1 * a3 - 3.0 * E2 * b3
         JnakK = 2.0 * E4 * b1 - 2.0 * E3 * a1
+        Pnak = ufl.conditional(ufl.eq(celltype, 1), Pnak * 0.9, ufl.conditional(ufl.eq(celltype, 2), Pnak * 0.7, Pnak))
         INaK = Pnak * scale_popu_KNaK * HF_scaling_Pnak * (zk * JnakK + zna * JnakNa)
 
         # Expressions for the IKb component
@@ -1082,6 +1101,8 @@ class TorLandFull(BaseCellModel):
         HF_scaling_Gncx = self._parameters["HF_scaling_Gncx"]
         HF_scaling_Pnak = self._parameters["HF_scaling_Pnak"]
         HF_scaling_cat50_ref = self._parameters["HF_scaling_cat50_ref"]
+        # Read in cell type for current element
+        celltype = self._parameters["celltype"]
 
         # Init return args
         F_expressions = [dolfin.Constant(0.0)] * 47
@@ -1184,6 +1205,7 @@ class TorLandFull(BaseCellModel):
         thLp = 3.0 * thL * HF_scaling_thL
         F_expressions[8] = (-hLp + hLssp) / thLp
         GNaL = 0.0279 * scale_INaL * scale_drug_INaL * scale_popu_GNaL * HF_scaling_GNaL
+        GNaL = ufl.conditional(ufl.eq(celltype, 1), GNaL * 0.6, GNaL)
         fINaLp = 1.0 / (1.0 + KmCaMK / CaMKa)
         INaL = (-ENa + v) * ((1.0 - fINaLp) * hL + fINaLp * hLp) * GNaL * mL
 
@@ -1195,13 +1217,20 @@ class TorLandFull(BaseCellModel):
         )
         F_expressions[9] = (-a + ass) / ta
         iss = 1.0 / (1.0 + 2194.970764538301 * ufl.exp(0.17510068289266328 * v))
-        tiF = 4.562 + delta_epi / (
-            0.14468698421272827 * ufl.exp(-0.01 * v) + 1.6300896349780942 * ufl.exp(0.06027727546714889 * v)
+        delta_epi_local = ufl.conditional(
+            ufl.eq(celltype, 1),
+            1.0 - (0.95 / (1.0 + ufl.exp((v + 70.0) / 5.0))),
+            1.0,
         )
-        tiS = 23.62 + delta_epi / (
-            0.00027617763953377436 * ufl.exp(-0.01693480101608806 * v)
-            + 0.024208962804604526 * ufl.exp(0.12377769525931426 * v)
+        tiF = 4.562 + 1.0 / (
+                0.14468698421272827 * ufl.exp(-0.01 * v) + 1.6300896349780942 * ufl.exp(0.06027727546714889 * v)
         )
+        tiS = 23.62 + 1.0 / (
+                0.00027617763953377436 * ufl.exp(-0.01693480101608806 * v)
+                + 0.024208962804604526 * ufl.exp(0.12377769525931426 * v)
+        )
+        tiF = tiF * delta_epi_local
+        tiS = tiS * delta_epi_local
         AiF = 1.0 / (1.0 + 0.24348537187522867 * ufl.exp(0.006613756613756614 * v))
         AiS = 1.0 - AiF
         F_expressions[10] = (-iF + iss) / tiF
@@ -1220,8 +1249,9 @@ class TorLandFull(BaseCellModel):
         F_expressions[14] = (-iSp + iss) / tiSp
         ip = AiF * iFp + AiS * iSp
         fItop = 1.0 / (1.0 + KmCaMK / CaMKa)
+        Gto_scaled = ufl.conditional(ufl.Or(ufl.eq(celltype, 1), ufl.eq(celltype, 2)), Gto * 2.0, Gto)
         Ito = (
-            Gto
+            Gto_scaled
             * scale_drug_Ito
             * scale_popu_Gto
             * HF_scaling_Gto
@@ -1316,6 +1346,7 @@ class TorLandFull(BaseCellModel):
         PhiCaK_i = 1.0 * vffrt * (gamma_ki * ki * ufl.exp(1.0 * vfrt) - gamma_kao * ko) / (-1.0 + ufl.exp(1.0 * vfrt))
 
         PCa = 0.000083757 * scale_ICaL * scale_drug_ICaL * scale_popu_GCaL
+        PCa = ufl.conditional(ufl.eq(celltype, 1), PCa * 1.2, ufl.conditional(ufl.eq(celltype, 2), PCa * 1.8, PCa))
         PCap = 1.1 * PCa
         PCaNa = 0.00125 * PCa
         PCaK = 0.0003574 * PCa
@@ -1396,6 +1427,7 @@ class TorLandFull(BaseCellModel):
         # )
 
         GKr = 0.0321 * scale_IKr * scale_drug_IKr * scale_popu_GKr
+        GKr = ufl.conditional(ufl.eq(celltype, 1), GKr * 1.3, ufl.conditional(ufl.eq(celltype, 2), GKr * 0.8, GKr))
         IKr = GKr * ufl.sqrt(ko / 5.0) * kr_o * (-EK + v)
 
         # Expressions for the IKs component
@@ -1412,6 +1444,7 @@ class TorLandFull(BaseCellModel):
         F_expressions[31] = (-xs2 + xs2ss) / txs2
         KsCa = 1.0 + 0.6 / (1.0 + 6.481821026062645e-07 * ufl.elem_pow(1.0 / cai, 1.4))
         GKs = 0.0011 * scale_IKs * scale_drug_IKs * scale_popu_GKs
+        GKs = ufl.conditional(ufl.eq(celltype, 1), GKs * 1.4, GKs)
         IKs = (-EKs + v) * GKs * KsCa * xs1 * xs2
 
         # Expressions for the IK1 component
@@ -1436,6 +1469,7 @@ class TorLandFull(BaseCellModel):
         # )
 
         GK1 = 0.6992 * scale_IK1 * scale_drug_IK1 * scale_popu_GK1 * HF_scaling_GK1
+        GK1 = ufl.conditional(ufl.eq(celltype, 1), GK1 * 1.2, ufl.conditional(ufl.eq(celltype, 2), GK1 * 1.3, GK1))
         IK1 = ufl.sqrt(ko / 5.0) * (-EK + v) * GK1 * K1ss
 
         # Expressions for the INaCa_i component
@@ -1564,6 +1598,10 @@ class TorLandFull(BaseCellModel):
         E4 = x4 / (x1 + x2 + x3 + x4)
         JnakNa = 3.0 * E1 * a3 - 3.0 * E2 * b3
         JnakK = 2.0 * E4 * b1 - 2.0 * E3 * a1
+        if celltype == 1:
+            Pnak = Pnak * 0.9
+        elif celltype == 2:
+            Pnak = Pnak * 0.7
         INaK = Pnak * scale_popu_KNaK * HF_scaling_Pnak * (zk * JnakK + zna * JnakNa)
 
         # Expressions for the IKb component
@@ -1630,12 +1668,14 @@ class TorLandFull(BaseCellModel):
         a_rel = 0.5 * bt
         jsrMidpoint = 1.7
         Jrel_inf = -ICaL * a_rel / (1.0 + HF_scaling_Jrel_inf * ufl.elem_pow(jsrMidpoint / cajsr, 8.0))
+        Jrel_inf = ufl.conditional(ufl.eq(celltype, 2), Jrel_inf * 1.7, Jrel_inf)
         tau_rel_tmp = bt / (1.0 + 0.0123 / cajsr)
         tau_rel = ufl.conditional(ufl.lt(tau_rel_tmp, 0.001), 0.001, tau_rel_tmp)
         F_expressions[32] = (-Jrelnp + Jrel_inf) / tau_rel
         btp = 1.25 * bt
         a_relp = 0.5 * btp
         Jrel_infp = -ICaL * a_relp / (1.0 + HF_scaling_Jrel_inf * ufl.elem_pow(jsrMidpoint / cajsr, 8.0))
+        Jrel_infp = ufl.conditional(ufl.eq(celltype, 2), Jrel_infp * 1.7, Jrel_infp)
         tau_relp_tmp = btp / (1.0 + 0.0123 / cajsr)
         tau_relp = ufl.conditional(ufl.lt(tau_relp_tmp, 0.001), 0.001, tau_relp_tmp)
         F_expressions[33] = (-Jrelp + Jrel_infp) / tau_relp
@@ -1645,6 +1685,8 @@ class TorLandFull(BaseCellModel):
         # Expressions for the calcium buffers component
         Jupnp = 0.005425 * cai / (0.00092 + cai)
         Jupp = 2.75 * 0.005425 * cai / (0.00092 - 0.00017 + cai)
+        Jupnp = ufl.conditional(ufl.eq(celltype, 1), Jupnp * 1.3, Jupnp)
+        Jupp = ufl.conditional(ufl.eq(celltype, 1), Jupp * 1.3, Jupp)
         fJupp = 1.0 / (1.0 + KmCaMK / CaMKa)
         Jleak = 0.0048825 * cansr * scale_popu_Kleak * HF_scaling_Jleak / 15.0
         Jup = -Jleak + ((1.0 - fJupp) * Jupnp + Jupp * fJupp) * scale_popu_KSERCA * HF_scaling_Jup
@@ -1724,6 +1766,7 @@ class TorLandFull(BaseCellModel):
         dCd = -Cd + C
         eta = ufl.conditional(ufl.lt(dCd, 0.0), etas, etal)
         F_expressions[43] = p_k * (-Cd + C) / eta
+        cmdnmax = ufl.conditional(ufl.eq(celltype, 1), cmdnmax * 1.3, cmdnmax)
         Bcai = 1.0 / (1.0 + cmdnmax * kmcmdn * ufl.elem_pow(kmcmdn + cai, -2.0))
         J_TRPN = trpnmax * F_expressions[41]
         F_expressions[44] = (

@@ -6,6 +6,7 @@ from typing import Dict
 from typing import Optional
 from typing import Type
 from typing import TYPE_CHECKING
+from simcardems.activation import PrecomputedStimulusUpdater
 
 import cbcbeat
 import dolfin
@@ -66,6 +67,7 @@ def setup_solver(
     theta=Config.ep_theta,
     preconditioner=Config.ep_preconditioner,
     PCL=Config.PCL,
+    activation_times=None
 ) -> cbcbeat.SplittingSolver:
     # Set-up cardiac model
     ps = setup_splitting_solver_parameters(
@@ -74,12 +76,14 @@ def setup_solver(
         dt=dt,
         scheme=scheme,
     )
+
     ep_heart = setup_model(
         cellmodel,
         coupling.geometry.ep_mesh,
         PCL=PCL,
         microstructure=coupling.geometry.microstructure_ep,
         stimulus_domain=coupling.geometry.stimulus_domain,
+        activation_times=activation_times
     )
     solver = cbcbeat.SplittingSolver(ep_heart, params=ps)
     # Extract the solution fields and set the initial conditions
@@ -87,6 +91,8 @@ def setup_solver(
     vs_.assign(cellmodel.initial_conditions())
 
     coupling.register_ep_model(solver)
+    if activation_times is not None:
+        coupling.stimulus_updater = ep_heart.stimulus_updater
     coupling.print_ep_info()
     return solver
 
@@ -150,6 +156,7 @@ def setup_model(
     C_m: float = 0.01,
     duration: float = 2.0,
     A: float = 50_000.0,
+    activation_times=None
 ) -> cbcbeat.CardiacModel:
     """Set-up cardiac model based on benchmark parameters
 
@@ -172,6 +179,8 @@ def setup_model(
         Stimulation duration in milliseconds, by default 2.0
     A: float, optional
         FIXME: Some value in mu A/cm^3, by default 50_000.0
+    activation_times: Array, optional
+        Endocardial activation times if prescribed.
 
     Returns
     -------
@@ -190,22 +199,31 @@ def setup_model(
     factor = 1.0 / (chi * C_m)  # NB: cbcbeat convention
     amplitude = factor * A * (1.0 / cm2mm) ** 3  # mV/ms
 
-    s = "((std::fmod(time,PCL) >= start) & (std::fmod(time,PCL) <= duration + start)) ? amplitude : 0.0"
+    stimulus_updater = None
+    if activation_times is not None:
+        stimulus_updater = PrecomputedStimulusUpdater(
+            act_fn=activation_times,
+            amplitude=amplitude,
+            duration=duration,
+            PCL=PCL,
+        )
+        I_s = stimulus_updater.get_stimulus()
+    else:
+        s = "((std::fmod(time,PCL) >= start) & (std::fmod(time,PCL) <= duration + start)) ? amplitude : 0.0"
+        I_s = dolfin.Expression(
+            s,
+            time=time,
+            start=0.0,
+            duration=duration,
+            amplitude=amplitude,
+            PCL=PCL,
+            degree=0)
 
-    I_s = dolfin.Expression(
-        s,
-        time=time,
-        start=0.0,
-        duration=duration,
-        amplitude=amplitude,
-        PCL=PCL,
-        degree=0,
-    )
-    # Store input parameters in cardiac model
-    stimulus = cbcbeat.Markerwise(
-        (I_s,),
-        (stimulus_domain.marker,),
-        stimulus_domain.domain,
+    stimulus = cbcbeat.Markerwise((I_s,), (stimulus_domain.marker,), stimulus_domain.domain)
+
+    heart = cbcbeat.CardiacModel(
+        domain=mesh, time=time, M_i=M, M_e=None,
+        cell_models=cellmodel, stimulus=stimulus, applied_current=None,
     )
 
     petsc_options = [
@@ -233,6 +251,7 @@ def setup_model(
         applied_current=None,
     )
 
+    heart.stimulus_updater = stimulus_updater
     return heart
 
 
@@ -332,3 +351,4 @@ def handle_cell_inits(
     if cell_inits is not None:
         cell_inits_tmp.update(cell_inits)
     return cell_inits_tmp
+

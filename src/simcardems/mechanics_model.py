@@ -11,6 +11,7 @@ from . import config
 from . import geometry
 from . import lvgeometry
 from . import slabgeometry
+from . import bivgeometry
 from . import utils
 from .newton_solver import MechanicsNewtonSolver
 from .newton_solver import MechanicsNewtonSolver_ODE
@@ -356,8 +357,18 @@ def resolve_boundary_conditions(
             traction=traction,
             spring=spring,
         )
+    elif isinstance(geo, bivgeometry.BiVentricularGeometry):
+        # Small nonzero initial pressure -- avoids a degenerate/singular
+        # starting solve given no Dirichlet base constraint, before the
+        # cycle controller's first real step() call takes over.
+        initial_pressure = 0.01 if traction is None else traction
+        return boundary_conditions.create_biv_boundary_conditions(
+            geo=geo,
+            traction_lv=initial_pressure,
+            traction_rv=initial_pressure,
+            spring=spring,
+        )
     else:
-        # TODO: Implement more boundary conditions
         raise NotImplementedError
 
 

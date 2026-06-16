@@ -62,6 +62,11 @@ def load_geometry(
             geo,
             stimulus_domain=stimulus_domain,
         )
+    elif mesh_type == MeshTypes.biv_ellipsoid.value:
+        return BiVentricularGeometry.from_geometry(
+            geo,
+            stimulus_domain=stimulus_domain,
+        )
 
     raise RuntimeError(f"Unknown mesh type {mesh_type!r}")
 

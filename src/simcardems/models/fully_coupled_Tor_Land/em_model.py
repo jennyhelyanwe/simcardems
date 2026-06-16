@@ -234,6 +234,8 @@ class EMCoupling(BaseEMCoupling):
 
     def solve_ep(self, interval: Tuple[float, float]) -> None:
         logger.debug("Solve EP")
+        if self.stimulus_updater is not None:
+            self.stimulus_updater.update(interval[0])
         self.ep_solver.step(interval)
 
     def print_mechanics_info(self):
@@ -301,6 +303,8 @@ class EMCoupling(BaseEMCoupling):
         popu_factors_file: Union[str, Path] = "",
         disease_state="healthy",
         PCL: float = 1000,
+        activation_times: Optional[dolfin.Function] = None,
+        celltype_function: Optional[dolfin.Function] = None
     ) -> BaseEMCoupling:
         logger.debug(f"Load state from path {path}")
         path = Path(path)
@@ -364,4 +368,6 @@ class EMCoupling(BaseEMCoupling):
             cell_params=cell_params,
             mech_state_init=mech_state,
             state_params=state_params,
+            activation_times=activation_times,
+            celltype_function = celltype_function
         )

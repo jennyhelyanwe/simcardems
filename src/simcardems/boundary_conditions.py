@@ -6,6 +6,7 @@ import pulse
 from . import config
 from . import lvgeometry
 from . import slabgeometry
+from . import bivgeometry
 from . import utils
 
 
@@ -172,6 +173,48 @@ def create_lv_boundary_conditions(
 
     return pulse.BoundaryConditions(
         dirichlet=(dirichlet_bc,),
+        neumann=neumann_bc,
+        robin=robin_bc,
+    )
+
+def create_biv_boundary_conditions(
+    geo: bivgeometry.BiVentricularGeometry,
+    traction_lv: typing.Union[dolfin.Constant, float] = None,
+    traction_rv: typing.Union[dolfin.Constant, float] = None,
+    spring: typing.Union[dolfin.Constant, float] = None,
+):
+    logger.debug(
+        f"Calling create_biv_boundary_conditions with geo: {geo!r}, "
+        f"traction_lv: {traction_lv!r}, traction_rv: {traction_rv!r}, spring: {spring!r}",
+    )
+
+    neumann_bc = []
+    if traction_lv is not None:
+        neumann_bc.append(
+            pulse.NeumannBC(
+                traction=utils.float_to_constant(traction_lv),
+                marker=geo.markers["ENDO_LV"][0],
+            ),
+        )
+    if traction_rv is not None:
+        neumann_bc.append(
+            pulse.NeumannBC(
+                traction=utils.float_to_constant(traction_rv),
+                marker=geo.markers["ENDO_RV"][0],
+            ),
+        )
+
+    robin_bc = []
+    if spring is not None:
+        robin_bc.append(
+            pulse.RobinBC(
+                value=utils.float_to_constant(spring),
+                marker=geo.markers["EPI"][0],
+            ),
+        )
+
+    return pulse.BoundaryConditions(
+        dirichlet=(),
         neumann=neumann_bc,
         robin=robin_bc,
     )
