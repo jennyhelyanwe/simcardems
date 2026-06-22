@@ -9,7 +9,7 @@ from . import utils
 from .geometry import BaseGeometry
 from .lvgeometry import LeftVentricularGeometry
 from .slabgeometry import SlabGeometry
-
+from .bivgeometry import BiVentricularGeometry
 
 logger = utils.getLogger(__name__)
 
@@ -23,6 +23,8 @@ class ValueExtractor:
         if isinstance(self.geo, SlabGeometry):
             self.boundary: Boundary = SlabBoundary(geo.mesh)
         elif isinstance(self.geo, LeftVentricularGeometry):
+            self.boundary = LVBoundary(geo.mesh)
+        elif isinstance(self.geo, BiVentricularGeometry):
             self.boundary = LVBoundary(geo.mesh)
         else:
             raise NotImplementedError

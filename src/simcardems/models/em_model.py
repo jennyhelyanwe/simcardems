@@ -67,7 +67,7 @@ def setup_EM_model(
         activation_times=activation_times,
     )
     coupling.register_ep_model(solver)
-
+    logger.info(f"Spring value: {config.spring}")
     mech_heart = mechanics_model.setup_solver(
         coupling=coupling,
         bnd_rigid=config.bnd_rigid,

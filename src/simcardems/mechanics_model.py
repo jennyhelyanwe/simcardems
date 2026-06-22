@@ -418,6 +418,11 @@ def create_problem(
             "verbose": verbose,
             "debug": debug_mode,
             "preconditioner": "hypre_amg",
+            "error_on_nonconvergence": False,
+            "relative_tolerance": 1e-5,
+            "absolute_tolerance": 1e-5,
+            "maximum_iterations": 20,
+            "report": True,  # ADD THIS
         },
         use_custom_newton_solver=use_custom_newton_solver,
     )
