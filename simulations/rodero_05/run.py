@@ -123,6 +123,7 @@ config.outdir = "test_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
 config.save_freq = 50
 config.linear_mechanics_solver = "gmres"
+config.spring = 10.0  # kPa/mm
 
 # Load cell type field
 CELL_TYPE_PATH = "./rodero_05_fine/rodero_05_fine_nodefield_cell-type.csv"
