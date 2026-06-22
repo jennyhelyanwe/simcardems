@@ -68,10 +68,9 @@ def interpolate_activation_to_ep_mesh(
                 endo_vertex_ids.add(v)
     coords = ep_mesh.coordinates()
     local_size = act_fn.vector().local_size()
-    endo_vids = list(endo_vertex_ids)
+    endo_vids = np.array(list(endo_vertex_ids), dtype=np.intp)
     endo_coords = coords[endo_vids]
     _, indices = tree.query(endo_coords, workers=1)
-    endo_vids = np.array(list(endo_vertex_ids))
     dofs = v2d[endo_vids]
     times = activation_times_mech[indices]
 
