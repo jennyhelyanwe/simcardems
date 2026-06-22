@@ -27,12 +27,15 @@ import numpy as np
 # import dolfin
 # print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: local mesh vertices = {biv_geo.ep_mesh.num_vertices()}", flush=True)
 
-print('Build geometry... ')
 import dolfin
 import pulse
 from simcardems.bivgeometry import BiVentricularGeometry
+def mpi_print(*args, **kwargs):
+    if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
+        print(*args, **kwargs)
 
 # Load mesh via POSIX (no MPI_File_open)
+mpi_print('Build geometry... ')
 mesh = dolfin.Mesh(dolfin.MPI.comm_world, "rodero_05_mesh.xml")
 
 # Load ffun
@@ -63,11 +66,11 @@ biv_geo = BiVentricularGeometry(
     parameters=info,
 )
 
-print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: local mesh vertices = {mesh.num_vertices()}", flush=True)
+mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: local mesh vertices = {mesh.num_vertices()}", flush=True)
 
 
 # 1. Load the raw activation-time file
-print('Load activation time file', flush=True)
+mpi_print('Load activation time file', flush=True)
 import pandas as pd
 node_coords = pd.read_csv("./rodero_05_fine/rodero_05_fine_xyz.csv", header=None).to_numpy() * 10.0
 # node_coords = biv_geo.mechanics_mesh.coordinates()
@@ -87,7 +90,7 @@ act_fn = interpolate_activation_to_ep_mesh(
 )
 
 # 3. Stimulus domain -- the cell-region marking, layer_thickness tunable
-print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Create stimulus domain", flush=True)
+mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Create stimulus domain", flush=True)
 stim_domain = endocardial_stimulus_domain(
     mesh=biv_geo.ep_mesh,
     ffun=biv_geo.ffun_ep,
@@ -103,7 +106,7 @@ biv_geo.stimulus_domain = stim_domain  # or however your loader injects this --
                                           # this attribute assignment is sufficient
 
 # 4. Config -- short test window
-print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Configuring...", flush=True)
+mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Configuring...", flush=True)
 config = Config()
 config.T = 50.0
 config.dt = 0.05
@@ -111,25 +114,26 @@ config.geometry_path = "our_biv_geo.h5"
 config.outdir = "test_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
 config.save_freq = 50
+config.linear_mechanics_solver = "gmres"
 
 # Load cell type field
 CELL_TYPE_PATH = "./rodero_05_fine/rodero_05_fine_nodefield_cell-type.csv"
-print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Loading cell type...", flush=True)
+mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Loading cell type...", flush=True)
 ct_values = load_dense_node_field(
     path=CELL_TYPE_PATH
 )
-print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Mapping cell type to EP mesh...", flush=True)
+mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Mapping cell type to EP mesh...", flush=True)
 cell_fn = map_dense_field_to_dg0_function(
     biv_geo.ep_mesh, node_coords, ct_values, {1: 0, 2: 2, 3: 1}
 )
 
 # Load IKs spatial field
 IKS_SCALE_PATH = "./rodero_05_fine/rodero_05_fine_nodefield_sf_IKs.csv"
-print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Loading sf IKs...", flush=True)
+mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Loading sf IKs...", flush=True)
 iks_values = load_dense_node_field(
     path=IKS_SCALE_PATH
 )
-print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Mapping sf IKs to EP mesh...", flush=True)
+mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Mapping sf IKs to EP mesh...", flush=True)
 iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
 
 # # Sanity check for whether celltype and sf IKs have been loaded in correctly
@@ -185,7 +189,7 @@ iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
 # 5. Build coupling directly (bypasses Runner.__init__'s internal
 #    setup_EM_model_from_config(self._config) call, which has no way
 #    to receive our pre-built biv_geo/act_fn)
-print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Setting EM model for config...", flush=True)
+mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: Setting EM model for config...", flush=True)
 coupling = em_model.setup_EM_model_from_config(
     config,
     geometry=biv_geo,
@@ -195,6 +199,6 @@ coupling = em_model.setup_EM_model_from_config(
 )
 
 # 6. Hand the pre-built coupling to Runner via the alternate constructor
-print('Run', flush=True)
+mpi_print('Run', flush=True)
 runner = Runner.from_models(coupling=coupling, config=config)
 runner.solve(T=config.T, save_freq=config.save_freq, show_progress_bar=True)

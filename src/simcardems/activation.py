@@ -86,7 +86,6 @@ def interpolate_activation_to_ep_mesh(
     act_fn.vector().set_local(local_vec)
 
     act_fn.vector().apply("insert")
-    print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: interpolate_activation_to_ep_mesh done", flush=True)
     dolfin.MPI.comm_world.barrier()
     return act_fn
 
@@ -103,7 +102,6 @@ def endocardial_stimulus_domain(
     stimulus region instead of BaseGeometry.default_stimulus_domain's
     whole-tissue default.
     """
-    print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: entering endocardial_stimulus_domain", flush=True)
     from . import geometry
 
     tdim = mesh.topology().dim()

@@ -33,9 +33,24 @@ class Runner:
                 return x.as_posix()
             return x
 
-        (self.outdir / "config.json").write_text(
-            json.dumps(self._config.as_dict(), default=serialize),
-        )
+        import dataclasses
+
+        def safe_serialize(obj):
+            if dataclasses.is_dataclass(obj):
+                return dataclasses.asdict(obj)
+            try:
+                return serialize(obj)
+            except (TypeError, ValueError):
+                return str(obj)
+
+        import dolfin
+        rank = dolfin.MPI.rank(dolfin.MPI.comm_world)
+
+        if rank == 0:
+            print({k: type(v) for k, v in self._config.as_dict().items()}, flush=True)
+            (self.outdir / "config.json").write_text(
+                json.dumps(self._config.as_dict(), default=safe_serialize),
+            )
 
         from . import set_log_level
 

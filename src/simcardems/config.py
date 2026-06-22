@@ -2,6 +2,7 @@ import json
 import logging
 import typing
 from dataclasses import dataclass, field
+import dataclasses
 
 import dolfin
 import typing_extensions
@@ -79,7 +80,13 @@ class Config:
     cycle_rv: CycleParams = field(default_factory=CycleParams)
 
     def as_dict(self):
-        return {k: v for k, v in self.__dict__.items()}
+        result = {}
+        for k, v in self.__dict__.items():
+            if dataclasses.is_dataclass(v):
+                result[k] = dataclasses.asdict(v)
+            else:
+                result[k] = v
+        return result
 
     @classmethod
     def from_json(cls, path: utils.PathLike) -> "Config":

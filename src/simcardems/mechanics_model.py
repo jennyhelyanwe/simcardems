@@ -417,6 +417,7 @@ def create_problem(
             "linear_solver": linear_solver,
             "verbose": verbose,
             "debug": debug_mode,
+            "preconditioner": "hypre_amg",
         },
         use_custom_newton_solver=use_custom_newton_solver,
     )
