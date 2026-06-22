@@ -1,3 +1,8 @@
+import os
+# Use FENICS_CACHE_DIR if set, otherwise default to ~/.cache
+cache_dir = os.environ.get("FENICS_CACHE_DIR", os.path.expanduser("~/.cache"))
+os.environ["XDG_CACHE_HOME"] = cache_dir
+
 from simcardems.activation import (
     load_activation_times,
     interpolate_activation_to_ep_mesh,
