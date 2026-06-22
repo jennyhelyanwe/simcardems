@@ -3,6 +3,9 @@ import os
 cache_dir = os.environ.get("FENICS_CACHE_DIR", os.path.expanduser("~/.cache"))
 os.environ["XDG_CACHE_HOME"] = cache_dir
 
+import logging
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+
 from simcardems.activation import (
     load_activation_times,
     interpolate_activation_to_ep_mesh,
