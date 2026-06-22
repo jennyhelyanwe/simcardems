@@ -55,37 +55,25 @@ def map_dense_field_to_ep_mesh(
     node_coords_mech: np.ndarray,
     values_mech: np.ndarray,
 ) -> dolfin.Function:
-    """
-    Nearest-neighbor map of a dense, full-coverage per-node field
-    (cell-type, IKs-scale) from the mechanics mesh onto every vertex
-    of the EP mesh.
-    """
     V = dolfin.FunctionSpace(ep_mesh, "P", 1)
     field_fn = dolfin.Function(V)
-
     tree = cKDTree(node_coords_mech)
-
     v2d = dolfin.vertex_to_dof_map(V)
     coords = ep_mesh.coordinates()
-    print("ep_mesh coords[8]:", coords[8])
-    print("node_coords_mech[8]:", node_coords_mech[8])
-    print("nearest point found by tree for coords[8]:", node_coords_mech[tree.query(coords[8])[1]])
-    for vid in range(ep_mesh.num_vertices()):
-        point = coords[vid, :]
-        dist, idx = tree.query(point)
-        if dist > 1e-9:
-            print(f"vid={vid}, dist={dist}, idx={idx} -- NOT a zero-distance match!")
-        nearest_value = values_mech[idx]
-        dof = v2d[vid]
 
-        # if vid < 20 or vid % 50000 == 0:
-        #     print(f"vid={vid}, idx={idx}, nearest_value={nearest_value}, dof={dof}, "
-        #           f"v2d.shape={v2d.shape}, V.dim()={V.dim()}, n_vertices={ep_mesh.num_vertices()}")
+    # Vectorized nearest-neighbor query
+    _, indices = tree.query(coords)
 
-        field_fn.vector()[dof] = nearest_value
-    print("vertex 8 dof:", v2d[8], "value written:", values_mech[tree.query(coords[8])[1]], "vector value at that dof:",
-          field_fn.vector()[v2d[8]])
+    # Vectorized assignment via get_local/set_local
+    local_vec = field_fn.vector().get_local()
+    local_size = len(local_vec)
 
+    dofs = v2d[np.arange(ep_mesh.num_vertices())]
+    mask = (dofs >= 0) & (dofs < local_size)
+    local_vec[dofs[mask]] = values_mech[indices[mask]]
+
+    field_fn.vector().set_local(local_vec)
+    dolfin.MPI.comm_world.barrier()
     field_fn.vector().apply("insert")
     return field_fn
 
@@ -113,15 +101,25 @@ def map_dense_field_to_dg0_function(
     V = dolfin.FunctionSpace(ep_mesh, "DG", 0)
     fn = dolfin.Function(V)
     tree = cKDTree(node_coords_mech)
-    vec = fn.vector()
     dm = V.dofmap()
-    for cell in dolfin.cells(ep_mesh):
-        centroid = cell.midpoint().array()
-        _, idx = tree.query(centroid)
-        celltype_val = label_to_celltype[int(values_mech[idx])]
+
+    # Vectorized: build all centroids at once
+    cells = list(dolfin.cells(ep_mesh))
+    centroids = np.array([c.midpoint().array() for c in cells])
+    _, indices = tree.query(centroids)
+
+    local_vec = fn.vector().get_local()
+    local_size = len(local_vec)
+
+    for i, cell in enumerate(cells):
+        celltype_val = label_to_celltype[int(values_mech[indices[i]])]
         dof = dm.cell_dofs(cell.index())[0]
-        vec[dof] = celltype_val
-    vec.apply("insert")
+        if 0 <= dof < local_size:
+            local_vec[dof] = celltype_val
+
+    fn.vector().set_local(local_vec)
+    dolfin.MPI.comm_world.barrier()
+    fn.vector().apply("insert")
     return fn
 
 def map_field_to_ep_mesh(

@@ -61,22 +61,33 @@ def interpolate_activation_to_ep_mesh(
 
     v2d = dolfin.vertex_to_dof_map(V)
     ep_mesh.init(2, 0)
-
     endo_vertex_ids = set()
     for facet in dolfin.facets(ep_mesh):
         if ffun_ep[facet.index()] in endo_marker_ep:
             for v in facet.entities(0):
                 endo_vertex_ids.add(v)
-
     coords = ep_mesh.coordinates()
-    for vid in endo_vertex_ids:
-        point = coords[vid]
-        _, idx = tree.query(point)
-        nearest_time = activation_times_mech[idx]
-        dof = v2d[vid]
-        act_fn.vector()[dof] = nearest_time
+    local_size = act_fn.vector().local_size()
+    endo_vids = list(endo_vertex_ids)
+    endo_coords = coords[endo_vids]
+    _, indices = tree.query(endo_coords, workers=1)
+    endo_vids = np.array(list(endo_vertex_ids))
+    dofs = v2d[endo_vids]
+    times = activation_times_mech[indices]
+
+    # Filter to valid local dofs only
+    mask = (dofs >= 0) & (dofs < local_size)
+    valid_dofs = dofs[mask]
+    valid_times = times[mask]
+
+    # Set all values at once
+    local_vec = act_fn.vector().get_local()
+    local_vec[valid_dofs] = valid_times
+    act_fn.vector().set_local(local_vec)
 
     act_fn.vector().apply("insert")
+    print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: interpolate_activation_to_ep_mesh done", flush=True)
+    dolfin.MPI.comm_world.barrier()
     return act_fn
 
 
@@ -92,6 +103,7 @@ def endocardial_stimulus_domain(
     stimulus region instead of BaseGeometry.default_stimulus_domain's
     whole-tissue default.
     """
+    print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: entering endocardial_stimulus_domain", flush=True)
     from . import geometry
 
     tdim = mesh.topology().dim()
@@ -118,7 +130,7 @@ def endocardial_stimulus_domain(
     marker = 1
     for cell_idx in marked_cells:
         cell_domain[cell_idx] = marker
-
+    dolfin.MPI.comm_world.barrier()
     return geometry.StimulusDomain(domain=cell_domain, marker=marker)
 
 

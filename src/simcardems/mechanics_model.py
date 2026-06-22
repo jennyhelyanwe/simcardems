@@ -71,7 +71,7 @@ def setup_solver(
             active_model=active_model,
             parameters=material_parameters,
         )
-
+    logger.info("Starting MechanicsProblem init...")
     problem = create_problem(
         material=material,
         geo=coupling.geometry,
@@ -88,7 +88,10 @@ def setup_solver(
     if state_prev is not None:
         problem.state.assign(state_prev)
 
+    logger.info("MechanicsProblem init done. Starting initial solve...")
     problem.solve()
+    logger.info("Initial mechanics solve done.")
+    logger.info("Coupling register model")
     coupling.register_mech_model(problem)
     coupling.print_mechanics_info()
 
@@ -101,6 +104,10 @@ class ContinuationBasedMechanicsProblem(pulse.MechanicsProblem):
         super().__init__(*args, **kwargs)
         self.old_states = []
         self.old_controls = []
+
+    def _set_dirichlet_bc(self):
+        self._dirichlet_bc = []
+        super()._set_dirichlet_bc()
 
     def _init_forms(self):
         raise NotImplementedError
