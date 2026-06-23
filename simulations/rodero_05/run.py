@@ -5,6 +5,7 @@ os.environ["XDG_CACHE_HOME"] = cache_dir
 
 import logging
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("simcardems").setLevel(logging.DEBUG)
 
 from simcardems.activation import (
     load_activation_times,
@@ -20,62 +21,62 @@ from simcardems.config import Config
 from simcardems.models import em_model
 from simcardems.runner import Runner
 import numpy as np
-
-
-# # 1. Build geometry (same as your validated test.py setup)
-# print('Build geometry... ')
-# from cardiac_geometries.geometry import Geometry
-# geo = Geometry.from_file("rodero_05_fine.h5")
-# from simcardems.bivgeometry import BiVentricularGeometry
-# biv_geo = BiVentricularGeometry.from_geometry(
-#     geo,
-#     ep_mesh=geo.mesh,
-#     ffun_ep=geo.ffun,
-# )
-# import dolfin
-# print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: local mesh vertices = {biv_geo.ep_mesh.num_vertices()}", flush=True)
-
 import dolfin
-import pulse
-from simcardems.bivgeometry import BiVentricularGeometry
 def mpi_print(*args, **kwargs):
     if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
         print(*args, **kwargs)
-
-# Load mesh via POSIX (no MPI_File_open)
-mpi_print('Build geometry... ')
-mesh = dolfin.Mesh(dolfin.MPI.comm_world, "rodero_05_mesh.xml")
-
-# Load ffun
-ffun = dolfin.MeshFunction("size_t", mesh, mesh.topology().dim() - 1)
-dolfin.File("rodero_05_ffun.xml") >> ffun
-
-# Load microstructure
-V = dolfin.VectorFunctionSpace(mesh, "Lagrange", 1)
-f0 = dolfin.Function(V)
-s0 = dolfin.Function(V)
-n0 = dolfin.Function(V)
-dolfin.File("rodero_05_f0.xml") >> f0
-dolfin.File("rodero_05_s0.xml") >> s0
-dolfin.File("rodero_05_n0.xml") >> n0
-
-# Load markers and info
-markers = np.load("rodero_05_markers.npy", allow_pickle=True).item()
-info = np.load("rodero_05_info.npy", allow_pickle=True).item()
-
-# Build BiVentricularGeometry directly, bypassing Geometry.from_file entirely
-biv_geo = BiVentricularGeometry(
-    mechanics_mesh=mesh,
-    ep_mesh=mesh,
-    markers=markers,
-    ffun=ffun,
-    ffun_ep=ffun,
-    microstructure=pulse.Microstructure(f0=f0, s0=s0, n0=n0),
-    parameters=info,
+# 1. Build geometry (same as your validated test.py setup)
+mpi_print('Build geometry... ', flush=True)
+from cardiac_geometries.geometry import Geometry
+geo = Geometry.from_file("rodero_05_fine.h5")
+from simcardems.bivgeometry import BiVentricularGeometry
+biv_geo = BiVentricularGeometry.from_geometry(
+    geo,
+    ep_mesh=geo.mesh,
+    ffun_ep=geo.ffun,
 )
 
-mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: local mesh vertices = {mesh.num_vertices()}", flush=True)
+mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: local mesh vertices = {biv_geo.ep_mesh.num_vertices()}", flush=True)
 
+# import dolfin
+# import pulse
+# from simcardems.bivgeometry import BiVentricularGeometry
+
+
+# # Load mesh via POSIX (no MPI_File_open)
+# mpi_print('Build geometry... ')
+# mesh = dolfin.Mesh(dolfin.MPI.comm_world, "rodero_05_mesh.xml")
+
+# # Load ffun
+# ffun = dolfin.MeshFunction("size_t", mesh, mesh.topology().dim() - 1)
+# dolfin.File("rodero_05_ffun.xml") >> ffun
+
+# # Load microstructure
+# V = dolfin.VectorFunctionSpace(mesh, "Lagrange", 1)
+# f0 = dolfin.Function(V)
+# s0 = dolfin.Function(V)
+# n0 = dolfin.Function(V)
+# dolfin.File("rodero_05_f0.xml") >> f0
+# dolfin.File("rodero_05_s0.xml") >> s0
+# dolfin.File("rodero_05_n0.xml") >> n0
+
+# # Load markers and info
+# markers = np.load("rodero_05_markers.npy", allow_pickle=True).item()
+# info = np.load("rodero_05_info.npy", allow_pickle=True).item()
+
+# # Build BiVentricularGeometry directly, bypassing Geometry.from_file entirely
+# biv_geo = BiVentricularGeometry(
+#     mechanics_mesh=mesh,
+#     ep_mesh=mesh,
+#     markers=markers,
+#     ffun=ffun,
+#     ffun_ep=ffun,
+#     microstructure=pulse.Microstructure(f0=f0, s0=s0, n0=n0),
+#     parameters=info,
+# )
+#
+# mpi_print(f"rank {dolfin.MPI.rank(dolfin.MPI.comm_world)}: local mesh vertices = {mesh.num_vertices()}", flush=True)
+#
 
 # 1. Load the raw activation-time file
 mpi_print('Load activation time file', flush=True)
@@ -122,7 +123,7 @@ config.geometry_path = "our_biv_geo.h5"
 config.outdir = "test_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
 config.save_freq = 50
-config.linear_mechanics_solver = "gmres"
+config.linear_mechanics_solver = "mumps"
 config.spring = 10.0  # kPa/mm
 
 # Load cell type field

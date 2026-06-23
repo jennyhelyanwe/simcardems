@@ -196,9 +196,11 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
         if self.strong_coupling:
             f0 = self.material.active.f0
             f = self._F * f0
-            lmbda = dolfin.sqrt(f**2)
-            Pa = self.material.active.Ta(lmbda) * dolfin.outer(f, f0)
-            self._virtual_work += dolfin.inner(Pa, dolfin.grad(v)) * dx
+            lmbda = dolfin.sqrt(f ** 2)
+            # Use frozen Ta_current for both residual and Jacobian to avoid
+            # JIT hang from ufl.min_value/ufl.max_value in symbolic Ta(lmbda)
+            Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
+            self._virtual_work += dolfin.inner(Pa_frozen, dolfin.grad(v)) * dx
 
         external_work = self._external_work(u, v)
         if external_work is not None:
@@ -228,7 +230,7 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
         self.solver = cls(
             problem=self._problem,
             state=self.state,
-            # update_cb=self.material.active.update_prev,
+            update_cb=self.material.active.update_prev,
             parameters=self.solver_parameters,
         )
 
@@ -317,15 +319,24 @@ class RigidMotionProblem(MechanicsProblem):
 
         f0 = self.material.active.f0
         f = self._F * f0
-        lmbda = dolfin.sqrt(f**2)
+        lmbda = dolfin.sqrt(f ** 2)
         Pa = self.material.active.Ta(lmbda) * dolfin.outer(f, f0)
         self._virtual_work += dolfin.inner(Pa, dolfin.grad(v)) * dx
 
+        # Use frozen Ta_current for Jacobian — avoids JIT hang from
+        # differentiating through ufl.min_value/ufl.max_value in Ta(lmbda)
+        Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
+        virtual_work_for_jacobian = (
+                self._virtual_work
+                - dolfin.inner(Pa, dolfin.grad(v)) * dx
+                + dolfin.inner(Pa_frozen, dolfin.grad(v)) * dx
+        )
         self._jacobian = dolfin.derivative(
-            self._virtual_work,
+            virtual_work_for_jacobian,
             self.state,
             dolfin.TrialFunction(self.state_space),
         )
+
         if init_solver:
             self._init_solver()
 
@@ -359,9 +370,10 @@ def resolve_boundary_conditions(
             fix_right_plane=fix_right_plane,
         )
     elif isinstance(geo, lvgeometry.LeftVentricularGeometry):
-        return boundary_conditions.create_lv_boundary_conditions(
+        initial_pressure = 0.01 if traction is None else traction
+        return boundary_conditions.create_lv_no_dirichlet_boundary_conditions(
             geo=geo,
-            traction=traction,
+            traction=initial_pressure,
             spring=spring,
         )
     elif isinstance(geo, bivgeometry.BiVentricularGeometry):

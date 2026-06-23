@@ -28,15 +28,14 @@ import dataclasses
 import typing
 
 import dolfin
-import ufl
-
-import pulse
-from pulse import kinematics
 
 try:
     import ufl_legacy as ufl
 except ImportError:
     import ufl
+
+import pulse
+from pulse import kinematics
 
 
 # --- Cavity volume (from previous turn, included for completeness) -----
@@ -110,7 +109,6 @@ class CavityState:
     """
     name: str
     params: CycleParams
-    plane_normal: typing.Tuple[float, float, float]
 
     phase: int = Phase.PRELOAD
     n_beats: int = 0
@@ -341,8 +339,8 @@ class BiVCycleController:
         self.rv_marker = rv_marker
 
     def initialize(self, u0: dolfin.Function):
-        v_lv = compute_cavity_volume(self.geometry, u0, self.lv_marker, self.lv_state.plane_normal)
-        v_rv = compute_cavity_volume(self.geometry, u0, self.rv_marker, self.rv_state.plane_normal)
+        v_lv = compute_cavity_volume(self.geometry, u0, self.lv_marker)
+        v_rv = compute_cavity_volume(self.geometry, u0, self.rv_marker)
         self.lv_state.initialize(v_lv)
         self.rv_state.initialize(v_rv)
 
@@ -354,23 +352,29 @@ class BiVCycleController:
           3. one combined iterate() call moving (LV, RV) pressure together
           4. recompute volumes from the new converged state, commit, advance phases
         """
-        u, p = problem.state.split(deepcopy=True)
-
-        v_lv_now = compute_cavity_volume(self.geometry, u, self.lv_marker, self.lv_state.plane_normal)
-        v_rv_now = compute_cavity_volume(self.geometry, u, self.rv_marker, self.rv_state.plane_normal)
+        u, _ = problem.state.split(deepcopy=True)
+        v_lv_now = compute_cavity_volume(self.geometry, u, self.lv_marker)
+        v_rv_now = compute_cavity_volume(self.geometry, u, self.rv_marker)
 
         target_lv = compute_target_pressure(self.lv_state, v_lv_now, t, dt)
         target_rv = compute_target_pressure(self.rv_state, v_rv_now, t, dt)
 
-        pulse.iterate.iterate(
-            problem,
-            control=(self.lv_pressure_constant, self.rv_pressure_constant),
-            target=(target_lv, target_rv),
-        )
+        if self.lv_state.phase == Phase.PRELOAD and self.rv_state.phase == Phase.PRELOAD:
+            # During preload assign directly — pressure ramps linearly and
+            # is small, no need for pulse.iterate's cautious stepping
+            self.lv_pressure_constant.assign(target_lv)
+            self.rv_pressure_constant.assign(target_rv)
+            problem.solve()
+        else:
+            pulse.iterate.iterate(
+                problem,
+                control=(self.lv_pressure_constant, self.rv_pressure_constant),
+                target=(target_lv, target_rv),
+            )
 
         u_new, _ = problem.state.split(deepcopy=True)
-        v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker, self.lv_state.plane_normal)
-        v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker, self.rv_state.plane_normal)
+        v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker)
+        v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker)
 
         commit_step(self.lv_state, v_lv_new, target_lv)
         commit_step(self.rv_state, v_rv_new, target_rv)

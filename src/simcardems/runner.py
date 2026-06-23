@@ -47,7 +47,7 @@ class Runner:
         rank = dolfin.MPI.rank(dolfin.MPI.comm_world)
 
         if rank == 0:
-            print({k: type(v) for k, v in self._config.as_dict().items()}, flush=True)
+            logger.debug({k: type(v) for k, v in self._config.as_dict().items()})
             (self.outdir / "config.json").write_text(
                 json.dumps(self._config.as_dict(), default=safe_serialize),
             )
