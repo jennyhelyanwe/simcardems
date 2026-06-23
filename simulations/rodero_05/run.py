@@ -7,6 +7,7 @@ logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
 import dolfin
 import numpy as np
+import pandas as pd
 import pulse
 from simcardems.activation import (
     load_activation_times,
@@ -29,23 +30,69 @@ from simcardems.biv_cavity_cycle_controller import (
     WindkesselParams,
     Phase,
 )
+from simcardems.postprocess import ecg_recovery
 
 def mpi_print(*args, **kwargs):
     if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
         print(*args, **kwargs, flush=True)
 
 
+# ── PseudoECG ──────────────────────────────────────────────────────────────────
+
+class PseudoECG:
+    def __init__(self, leads: dict, sigma_b: float = 1.0):
+        self.leads    = leads
+        self.sigma_b  = sigma_b
+        self.log      = {name: [] for name in leads}
+        self.times    = []
+        self._file    = None
+
+    def open_file(self, path: str):
+        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
+            self._file = open(path, "w")
+            self._file.write("t_ms," + ",".join(self.leads.keys()) + "\n")
+            self._file.flush()
+
+    def compute(self, v: dolfin.Function, t: float):
+        mesh = v.function_space().mesh()
+        vals = []
+        for name, (pos, neg) in self.leads.items():
+            phi_pos = ecg_recovery(v=v, sigma_b=self.sigma_b, point=np.array(pos), mesh=mesh)
+            phi_neg = ecg_recovery(v=v, sigma_b=self.sigma_b, point=np.array(neg), mesh=mesh)
+            val = phi_pos - phi_neg
+            self.log[name].append(val)
+            vals.append(val)
+        self.times.append(t)
+        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0 and self._file is not None:
+            self._file.write(f"{t:.3f}," + ",".join(f"{v:.8f}" for v in vals) + "\n")
+            self._file.flush()
+
+    def close(self):
+        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0 and self._file is not None:
+            self._file.close()
+
+
 # ── BiVCycleRunner ─────────────────────────────────────────────────────────────
 
 class BiVCycleRunner(Runner):
-    def set_cycle_controller(self, controller, mech_problem, outdir, pseudo_ecg=None, dt_ecg=5.0):
+    def set_cycle_controller(self, controller, mech_problem, outdir,
+                              pseudo_ecg=None, dt_ecg=5.0):
         self._cycle_controller = controller
-        self._mech_problem = mech_problem
-        self._outdir = outdir
-        self._pv_log = []
-        self._pseudo_ecg = pseudo_ecg
-        self._dt_ecg = dt_ecg
-        self._last_ecg_t = -dt_ecg  # ensure first evaluation happens
+        self._mech_problem     = mech_problem
+        self._outdir           = outdir
+        self._pseudo_ecg       = pseudo_ecg
+        self._dt_ecg           = dt_ecg
+        self._last_ecg_t       = -dt_ecg
+
+        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
+            self._pv_file = open(os.path.join(outdir, "pv_loop.csv"), "w")
+            self._pv_file.write("t_ms,LVP_kPa,LVV,RVP_kPa,RVV\n")
+            self._pv_file.flush()
+        else:
+            self._pv_file = None
+
+        if pseudo_ecg is not None:
+            pseudo_ecg.open_file(os.path.join(outdir, "pseudo_ecg.csv"))
 
     def _solve_mechanics(self):
         self.coupling.coupling_to_mechanics()
@@ -63,81 +110,31 @@ class BiVCycleRunner(Runner):
         )
         lv = self._cycle_controller.lv_state
         rv = self._cycle_controller.rv_state
+
         mpi_print(
             f"  → t={t_ms:.1f} ms"
             f"  LV phase={lv.phase}  LVP={lv.pressure_n:.3f} kPa  LVV={lv.volume_n:.2f}"
             f"  RV phase={rv.phase}  RVP={rv.pressure_n:.3f} kPa  RVV={rv.volume_n:.2f}"
         )
-        self._pv_log.append((
-            t_ms,
-            lv.pressure_n, lv.volume_n,
-            rv.pressure_n, rv.volume_n,
-        ))
+
+        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0 and self._pv_file is not None:
+            self._pv_file.write(
+                f"{t_ms:.3f},{lv.pressure_n:.6f},{lv.volume_n:.6f},"
+                f"{rv.pressure_n:.6f},{rv.volume_n:.6f}\n"
+            )
+            self._pv_file.flush()
+
+        if self._pseudo_ecg is not None and t_ms - self._last_ecg_t >= self._dt_ecg - 1e-10:
+            self.coupling.assigners.assign_ep()
+            v_fn = self.coupling.assigners.functions["ep"]["V"]
+            self._pseudo_ecg.compute(v_fn, t_ms)
+            self._last_ecg_t = t_ms
+
+    def close_files(self):
+        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0 and self._pv_file is not None:
+            self._pv_file.close()
         if self._pseudo_ecg is not None:
-            t_ms = TimeStepper.ns2ms(self.t)
-            if t_ms - self._last_ecg_t >= self._dt_ecg - 1e-10:
-                self.coupling.assigners.assign_ep()
-                v_fn = self.coupling.assigners.functions["ep"]["V"]
-                self._pseudo_ecg.compute(v_fn, t_ms)
-                self._last_ecg_t = t_ms
-
-    def save_pv_log(self):
-        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
-            arr = np.array(self._pv_log)
-            path = os.path.join(self._outdir, "pv_loop.csv")
-            np.savetxt(
-                path, arr, delimiter=",",
-                header="t_ms,LVP_kPa,LVV,RVP_kPa,RVV", comments="",
-            )
-            mpi_print(f"PV loop saved to {path}")
-
-# Set up Pseudo ECG
-from simcardems.postprocess import ecg_recovery
-class PseudoECG:
-    """
-    Computes pseudo-ECG leads at user-defined electrode locations
-    using the lead field / reciprocity formula at each mechanics timestep.
-
-    Electrode locations in mm, same coordinate system as the mesh.
-    Lead = phi(positive_electrode) - phi(negative_electrode)
-    """
-
-    def __init__(self, leads: dict, sigma_b: float = 1.0):
-        """
-        leads: dict of lead_name -> (positive_electrode, negative_electrode)
-               each electrode is a (x, y, z) tuple in mm
-        sigma_b: bulk conductivity in mS/mm, default 1.0
-        """
-        self.leads = leads
-        self.sigma_b = sigma_b
-        self.log = {name: [] for name in leads}
-        self.times = []
-
-    def compute(self, v: dolfin.Function, t: float):
-        """Call at each timestep where V is available."""
-        mesh = v.function_space().mesh()
-        for name, (pos, neg) in self.leads.items():
-            phi_pos = ecg_recovery(
-                v=v, sigma_b=self.sigma_b,
-                point=np.array(pos), mesh=mesh,
-            )
-            phi_neg = ecg_recovery(
-                v=v, sigma_b=self.sigma_b,
-                point=np.array(neg), mesh=mesh,
-            )
-            self.log[name].append(phi_pos - phi_neg)
-        self.times.append(t)
-
-    def save(self, path: str):
-        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
-            header = "t_ms," + ",".join(self.leads.keys())
-            data = np.column_stack([
-                self.times,
-                *[self.log[name] for name in self.leads]
-            ])
-            np.savetxt(path, data, delimiter=",", header=header, comments="")
-            mpi_print(f"Pseudo-ECG saved to {path}")
-
+            self._pseudo_ecg.close()
 
 
 # ── 1. Geometry ────────────────────────────────────────────────────────────────
@@ -158,13 +155,13 @@ mpi_print(f"Mesh vertices: {biv_geo.ep_mesh.num_vertices()}")
 # ── 2. Activation times ────────────────────────────────────────────────────────
 
 mpi_print('Load activation times...')
-import pandas as pd
 node_coords = pd.read_csv(
     "./rodero_05_fine/rodero_05_fine_xyz.csv", header=None
 ).to_numpy() * 10.0
 
-path = "./heart.endocardial-activation-times"
-node_ids, activation_times, coords_subset = load_activation_times(path, node_coords)
+node_ids, activation_times, coords_subset = load_activation_times(
+    "./heart.endocardial-activation-times", node_coords
+)
 activation_times = activation_times * 1000.0  # s -> ms
 
 act_fn = interpolate_activation_to_ep_mesh(
@@ -193,18 +190,18 @@ biv_geo.stimulus_domain = stim_domain
 
 mpi_print('Configuring...')
 config = Config()
-config.T                              = 800.0   # ms — one full beat
-config.dt                             = 0.05    # ms — EP timestep
-config.dt_mech                        = 1.0     # ms — mechanics timestep
-config.geometry_path                  = "rodero_05_fine.h5"
-config.outdir                         = "biv_run_output"
-config.coupling_type                  = "fully_coupled_Tor_Land"
-config.save_freq                      = 20      # save every 20 mechanics steps = every 20 ms
-config.linear_mechanics_solver        = "mumps"
-config.spring                         = 10.0    # kPa/mm epicardial Robin
-config.traction                       = 0.01    # kPa — ensures Neumann BCs created
+config.T                                  = 800.0
+config.dt                                 = 0.05
+config.dt_mech                            = 1.0
+config.geometry_path                      = "rodero_05_fine.h5"
+config.outdir                             = "biv_run_output"
+config.coupling_type                      = "fully_coupled_Tor_Land"
+config.save_freq                          = 20
+config.linear_mechanics_solver            = "mumps"
+config.spring                             = 10.0
+config.traction                           = 0.01
 config.mechanics_use_custom_newton_solver = True
-config.mechanics_solve_strategy       = "hybrid"
+config.mechanics_solve_strategy           = "hybrid"
 
 
 # ── 5. Spatial fields ──────────────────────────────────────────────────────────
@@ -236,10 +233,8 @@ coupling = em_model.setup_EM_model_from_config(
 
 LV_ENDO_MARKER = biv_geo.markers["ENDO_LV"][0]
 RV_ENDO_MARKER = biv_geo.markers["ENDO_RV"][0]
+mech_problem   = coupling.mech_solver
 
-mech_problem = coupling.mech_solver
-
-# Fish out Neumann BC constants
 lv_pressure_const = None
 rv_pressure_const = None
 for nbc in mech_problem.bcs.neumann:
@@ -253,7 +248,6 @@ if lv_pressure_const is None:
 if rv_pressure_const is None:
     raise RuntimeError("No Neumann BC found on ENDO_RV")
 
-# LV params — preload 0→0.5 kPa over 50 ms, fill to 1.0 kPa by 100 ms
 lv_params = CycleParams(
     t_zero=50.0,
     t_prestress=0.0,
@@ -276,18 +270,18 @@ lv_params = CycleParams(
 rv_params = CycleParams(
     t_zero=50.0,
     t_prestress=0.0,
-    preload_pressure=0.17,       # 0.5 / 3
+    preload_pressure=0.17,
     prestress_pressure=0.0,
     t_end_diastole=100.0,
-    p_end_diastole=0.33,         # 1.0 / 3
+    p_end_diastole=0.33,
     gain_contraction=(1.0, 0.5),
     gain_relaxation=(0.5, 0.2),
-    p_fill=0.033,                # 0.1 / 3
+    p_fill=0.033,
     period=800.0,
     windkessel=WindkesselParams(
-        p_init=3.0,              # ~9.0 / 3
-        compliance=3.0,          # higher compliance than LV
-        resistance=33.0,         # 100.0 / 3
+        p_init=3.0,
+        compliance=3.0,
+        resistance=33.0,
         evolve=True,
     ),
 )
@@ -311,47 +305,54 @@ mpi_print(f"Initial LV volume: {lv_state.volume_n:.2f}")
 mpi_print(f"Initial RV volume: {rv_state.volume_n:.2f}")
 
 
-# ── 8. Run ─────────────────────────────────────────────────────────────────────
-# Electrode locations in mm — adjust to your mesh coordinate system
+# ── 8. Pseudo-ECG ─────────────────────────────────────────────────────────────
+
+mpi_print('Loading electrode locations...')
 electrode_df = pd.read_csv(
     "./rodero_05_fine/rodero_05_fine_nodefield_electrode_xyz.csv",
     header=None, names=["x", "y", "z"],
 )
-electrodes = electrode_df.to_numpy()  # mm
+electrodes = electrode_df.to_numpy()
 
 LA, RA, LL = electrodes[0], electrodes[1], electrodes[2]
-V1, V2, V3, V4, V5, V6 = electrodes[4], electrodes[5], electrodes[6], electrodes[7], electrodes[8], electrodes[9]
-
-# Wilson central terminal
+V1, V2, V3, V4, V5, V6 = electrodes[4], electrodes[5], electrodes[6], \
+                           electrodes[7], electrodes[8], electrodes[9]
 wct = tuple((LA + RA + LL) / 3.0)
 
 pseudo_ecg = PseudoECG(
     leads={
-        # Limb leads
-        "I":    (tuple(LA), tuple(RA)),
-        "II":   (tuple(LL), tuple(RA)),
-        "III":  (tuple(LL), tuple(LA)),
-        # Augmented limb leads
-        "aVR":  (tuple(RA), tuple((LA + LL) / 2.0)),
-        "aVL":  (tuple(LA), tuple((RA + LL) / 2.0)),
-        "aVF":  (tuple(LL), tuple((RA + LA) / 2.0)),
-        # Precordial leads (unipolar vs WCT)
-        "V1":   (tuple(V1), wct),
-        "V2":   (tuple(V2), wct),
-        "V3":   (tuple(V3), wct),
-        "V4":   (tuple(V4), wct),
-        "V5":   (tuple(V5), wct),
-        "V6":   (tuple(V6), wct),
+        "I":   (tuple(LA), tuple(RA)),
+        "II":  (tuple(LL), tuple(RA)),
+        "III": (tuple(LL), tuple(LA)),
+        "aVR": (tuple(RA), tuple((LA + LL) / 2.0)),
+        "aVL": (tuple(LA), tuple((RA + LL) / 2.0)),
+        "aVF": (tuple(LL), tuple((RA + LA) / 2.0)),
+        "V1":  (tuple(V1), wct),
+        "V2":  (tuple(V2), wct),
+        "V3":  (tuple(V3), wct),
+        "V4":  (tuple(V4), wct),
+        "V5":  (tuple(V5), wct),
+        "V6":  (tuple(V6), wct),
     },
     sigma_b=1.0,
 )
 
+
+# ── 9. Run ─────────────────────────────────────────────────────────────────────
+
 os.makedirs(config.outdir, exist_ok=True)
+config.traction = float(lv_pressure_const)  # reset to float for HDF5 serialisation
+
 runner = BiVCycleRunner.from_models(coupling=coupling, config=config)
 runner.set_cycle_controller(
     cycle_controller, mech_problem, config.outdir,
     pseudo_ecg=pseudo_ecg, dt_ecg=5.0,
 )
-runner.solve(T=config.T, save_freq=config.save_freq, show_progress_bar=True)
-runner.save_pv_log()
-mpi_print("Done.")
+
+try:
+    runner.solve(T=config.T, save_freq=config.save_freq, show_progress_bar=True)
+except Exception as e:
+    mpi_print(f"Runner error: {e}")
+finally:
+    runner.close_files()
+    mpi_print("Done.")

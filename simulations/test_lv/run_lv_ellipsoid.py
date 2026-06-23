@@ -63,11 +63,29 @@ def mpi_print(*args, **kwargs):
 # ── LVCycleRunner ──────────────────────────────────────────────────────────────
 
 class LVCycleRunner(Runner):
-    def set_cycle_controller(self, controller, mech_problem, outdir):
+    def set_cycle_controller(self, controller, mech_problem, outdir, pseudo_ecg=None, dt_ecg=5.0):
         self._cycle_controller = controller
         self._mech_problem = mech_problem
         self._outdir = outdir
-        self._pv_log = []
+        self._pseudo_ecg = pseudo_ecg
+        self._dt_ecg = dt_ecg
+        self._last_ecg_t = -dt_ecg
+
+        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
+            self._pv_file = open(os.path.join(outdir, "pv_loop.csv"), "w")
+            self._pv_file.write("t_ms,LVP_kPa,LVV\n")
+            self._pv_file.flush()
+
+            if pseudo_ecg is not None:
+                self._ecg_file = open(os.path.join(outdir, "pseudo_ecg.csv"), "w")
+                lead_names = ",".join(pseudo_ecg.leads.keys())
+                self._ecg_file.write(f"t_ms,{lead_names}\n")
+                self._ecg_file.flush()
+            else:
+                self._ecg_file = None
+        else:
+            self._pv_file = None
+            self._ecg_file = None
 
     def _solve_mechanics(self):
         self.coupling.coupling_to_mechanics()
@@ -91,7 +109,21 @@ class LVCycleRunner(Runner):
                 f"  LVP={state.pressure_n:.3f} kPa"
                 f"  LVV={state.volume_n:.2f}"
             )
-        self._pv_log.append((t_ms, state.pressure_n, state.volume_n))
+            self._pv_file.write(
+                f"{t_ms:.3f},{state.pressure_n:.6f},{state.volume_n:.6f}\n"
+            )
+            self._pv_file.flush()
+
+        if self._pseudo_ecg is not None and t_ms - self._last_ecg_t >= self._dt_ecg - 1e-10:
+            self.coupling.assigners.assign_ep()
+            v_fn = self.coupling.assigners.functions["ep"]["V"]
+            self._pseudo_ecg.compute(v_fn, t_ms)
+            self._last_ecg_t = t_ms
+
+            if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0 and self._ecg_file is not None:
+                vals = ",".join(f"{v:.6f}" for v in self._pseudo_ecg.last_values)
+                self._ecg_file.write(f"{t_ms:.3f},{vals}\n")
+                self._ecg_file.flush()
 
     def save_pv_log(self):
         if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
@@ -141,6 +173,67 @@ lv_geo = LeftVentricularGeometry.from_geometry(
     ffun_ep=geo.ffun,    # same ffun, no adapt needed
 )
 
+from simcardems.postprocess import ecg_recovery
+class PseudoECG:
+    """
+    Computes pseudo-ECG leads at user-defined electrode locations
+    using the lead field / reciprocity formula at each mechanics timestep.
+
+    Electrode locations in mm, same coordinate system as the mesh.
+    Lead = phi(positive_electrode) - phi(negative_electrode)
+    """
+
+    def __init__(self, leads: dict, sigma_b: float = 1.0):
+        """
+        leads: dict of lead_name -> (positive_electrode, negative_electrode)
+               each electrode is a (x, y, z) tuple in mm
+        sigma_b: bulk conductivity in mS/mm, default 1.0
+        """
+        self.leads = leads
+        self.sigma_b = sigma_b
+        self.log = {name: [] for name in leads}
+        self.times = []
+
+    def compute(self, v: dolfin.Function, t: float):
+        mesh = v.function_space().mesh()
+        self.last_values = []
+        for name, (pos, neg) in self.leads.items():
+            phi_pos = ecg_recovery(v=v, sigma_b=self.sigma_b, point=np.array(pos), mesh=mesh)
+            phi_neg = ecg_recovery(v=v, sigma_b=self.sigma_b, point=np.array(neg), mesh=mesh)
+            val = phi_pos - phi_neg
+            self.log[name].append(val)
+            self.last_values.append(val)
+        self.times.append(t)
+
+    def save(self, path: str):
+        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
+            header = "t_ms," + ",".join(self.leads.keys())
+            data = np.column_stack([
+                self.times,
+                *[self.log[name] for name in self.leads]
+            ])
+            np.savetxt(path, data, delimiter=",", header=header, comments="")
+            mpi_print(f"Pseudo-ECG saved to {path}")
+
+# Electrode locations in mm — adjust to your mesh coordinate system
+# For the LV ellipsoid (long axis along z, apex at z~-17):
+pseudo_ecg = PseudoECG(
+    leads={
+        "I":   ((100,   0,  50), (-100,   0,  50)),
+        "II":  (( 50, -100, 50), ( -50, 100,  50)),
+        "III": (( 50, -100, 50), ( 100,   0,  50)),
+        "aVR": ((-100,   0, 50), (  75, -50,  50)),
+        "aVL": (( 100,   0, 50), ( -25, -50,  50)),
+        "aVF": ((   0, -100, 50), (   0,  50,  50)),
+        "V1":  ((  20,  -30, 30), (  0,   0,  50)),
+        "V2":  ((  10,  -35, 20), (  0,   0,  50)),
+        "V3":  (( -10,  -35, 10), (  0,   0,  50)),
+        "V4":  (( -20,  -30,  0), (  0,   0,  50)),
+        "V5":  (( -30,  -20,-10), (  0,   0,  50)),
+        "V6":  (( -35,    0,-10), (  0,   0,  50)),
+    },
+    sigma_b=1.0,
+)
 # # ── Gram-Schmidt orthonormalisation of fibre fields ────────────────────────────
 # # P1 nodal fibres lose orthonormality when interpolated to quadrature points
 # # independently. Fix by projecting to quadrature space and enforcing
@@ -375,16 +468,25 @@ mpi_print(f"Initial LV volume: {lv_state.volume_n:.2f}")
 
 mpi_print("Starting time loop...")
 os.makedirs(config.outdir, exist_ok=True)
+def close_files(self):
+    if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
+        if self._pv_file:
+            self._pv_file.close()
+        if self._ecg_file:
+            self._ecg_file.close()
 
 runner = LVCycleRunner.from_models(coupling=coupling, config=config)
-runner.set_cycle_controller(cycle_controller, mech_problem, config.outdir)
+runner.set_cycle_controller(cycle_controller, mech_problem, config.outdir, pseudo_ecg=pseudo_ecg, dt_ecg=5.0)
 
 u0, _ = mech_problem.state.split(deepcopy=True)
 cycle_controller.initialize(u0)
 mpi_print(f"Initial LV volume: {lv_state.volume_n:.2f}")
 
-runner.solve(T=config.T, save_freq=config.save_freq, show_progress_bar=True)
-
-runner.save_pv_log()
-mpi_print("Done.")
+try:
+    runner.solve(T=config.T, save_freq=config.save_freq, show_progress_bar=True)
+except Exception as e:
+    mpi_print(f"Runner crashed: {e}")
+finally:
+    runner.close_files()
+    mpi_print("Done.")
 
