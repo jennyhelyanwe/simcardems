@@ -85,11 +85,29 @@ def setup_solver(
         debug_mode=debug_mode,
     )
 
-    if state_prev is not None:
-        problem.state.assign(state_prev)
-
-    logger.info("MechanicsProblem init done. Starting initial solve...")
+    # Stage 1: scaffold — pin the base, solve the 0.01 kPa reference state
+    init_p = 0.01 if traction is None else traction
+    problem.bcs = boundary_conditions.create_biv_boundary_conditions(
+        geo=coupling.geometry,
+        traction_lv=init_p,
+        traction_rv=init_p,
+        spring=spring,
+        fix_base=True,
+    )
     problem.solve()
+    logger.info("Fixed-base solve done. Releasing base, re-solving free...")
+
+    # Stage 2: release base, re-solve free from the warm (held) state
+    problem.bcs = boundary_conditions.create_biv_boundary_conditions(
+        geo=coupling.geometry,
+        traction_lv=init_p,
+        traction_rv=init_p,
+        spring=spring,
+        fix_base=False,
+    )
+    problem.solve()
+    logger.info("Free-base initial solve done.")
+
     logger.info("Initial mechanics solve done.")
     logger.info("Coupling register model")
     coupling.register_mech_model(problem)
