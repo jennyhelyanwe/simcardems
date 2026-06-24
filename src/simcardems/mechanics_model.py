@@ -44,14 +44,14 @@ def setup_solver(
 
     # Use parameters from Biaxial test in Holzapfel 2019 (Table 1).
     material_parameters = dict(
-        a=2.28,
-        a_f=1.686,
-        b=9.726,
-        b_f=15.779,
-        a_s=0.0,
-        b_s=0.0,
-        a_fs=0.0,
-        b_fs=0.0,
+        a=0.059,  # kPa
+        a_f=18.472,  # kPa
+        b=8.023,
+        b_f=16.026,
+        a_s=2.481,  # kPa
+        b_s=11.120,
+        a_fs=0.216,  # kPa
+        b_fs=11.436,
     )
 
     active_model = ActiveModel(coupling=coupling, parameters=coupling.cell_params())
