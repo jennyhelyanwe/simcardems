@@ -36,7 +36,10 @@ except ImportError:
 
 import pulse
 from pulse import kinematics
+from . import utils
 
+
+logger = utils.getLogger(__name__)
 
 # --- Cavity volume (from previous turn, included for completeness) -----
 
@@ -358,10 +361,10 @@ class BiVCycleController:
 
         target_lv = compute_target_pressure(self.lv_state, v_lv_now, t, dt)
         target_rv = compute_target_pressure(self.rv_state, v_rv_now, t, dt)
-
         if self.lv_state.phase == Phase.PRELOAD and self.rv_state.phase == Phase.PRELOAD:
             # During preload assign directly — pressure ramps linearly and
             # is small, no need for pulse.iterate's cautious stepping
+            logger.debug(f"[PRELOAD] target_lv: {target_lv!r} kPa, target_rv: {target_rv!r} kPa")
             self.lv_pressure_constant.assign(target_lv)
             self.rv_pressure_constant.assign(target_rv)
             problem.solve()

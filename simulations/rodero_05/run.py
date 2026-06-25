@@ -5,6 +5,8 @@ os.environ["XDG_CACHE_HOME"] = cache_dir
 import logging
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
 logging.getLogger("simcardems.newton_solver").setLevel(logging.DEBUG)
+logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.DEBUG)
+
 import dolfin
 import numpy as np
 import pandas as pd
@@ -138,7 +140,6 @@ class BiVCycleRunner(Runner):
 
 
 # ── 1. Geometry ────────────────────────────────────────────────────────────────
-
 mpi_print('Build geometry...')
 from cardiac_geometries.geometry import Geometry
 from simcardems.bivgeometry import BiVentricularGeometry
@@ -198,9 +199,10 @@ config.coupling_type                      = "fully_coupled_Tor_Land"
 config.save_freq                          = 20
 config.linear_mechanics_solver            = "gmres"
 config.spring                             = 10.0
-config.traction                           = 0.01
+# config.traction                           = 0.01
+config.traction                           = 0.001
 # config.traction                           = 0.5
-config.mechanics_use_custom_newton_solver = True
+config.mechanics_use_custom_newton_solver = False
 config.mechanics_solve_strategy           = "hybrid"
 
 
@@ -220,44 +222,44 @@ iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
 # ── 6. EM coupling ─────────────────────────────────────────────────────────────
 
 mpi_print('Setting up EM model...')
-import simcardems.mechanics_model as mm
-original_solve = mm.MechanicsProblem.solve
-
-def patched_solve(self):
-    rank = dolfin.MPI.rank(dolfin.MPI.comm_world)
-
-    self._init_forms(init_solver=False)
-
-    import petsc4py
-    petsc4py.init()
-    from petsc4py import PETSc
-
-    A = dolfin.PETScMatrix()
-    dolfin.assemble(self._jacobian, tensor=A)
-
-    norm_frob = A.norm('frobenius')
-    norm_inf = A.norm('linf')
-    norm_1 = A.norm('l1')
-    nnz = A.nnz()
-
-    if rank == 0:
-        print(f"Jacobian size: {A.size(0)} x {A.size(1)}", flush=True)
-        print(f"Jacobian NNZ: {nnz}", flush=True)
-        print(f"Jacobian Frobenius norm: {norm_frob:.6e}", flush=True)
-        print(f"Jacobian linf norm (max row sum): {norm_inf:.6e}", flush=True)
-        print(f"Jacobian l1 norm (max col sum): {norm_1:.6e}", flush=True)
-
-    dolfin.PETScOptions.clear()
-    dolfin.PETScOptions.set("ksp_type", "preonly")
-    dolfin.PETScOptions.set("pc_type", "lu")
-    dolfin.PETScOptions.set("pc_factor_mat_solver_type", "mumps")
-    dolfin.PETScOptions.set("mat_mumps_icntl_4", "2")  # MUMPS INFOG dump
-    self.solver.linear_solver().set_from_options()
-    return original_solve(self)
-
-# ─────────────────────────────────────────────────────────────────
-
-mm.MechanicsProblem.solve = patched_solve
+# import simcardems.mechanics_model as mm
+# original_solve = mm.MechanicsProblem.solve
+#
+# def patched_solve(self):
+#     rank = dolfin.MPI.rank(dolfin.MPI.comm_world)
+#
+#     self._init_forms(init_solver=False)
+#
+#     import petsc4py
+#     petsc4py.init()
+#     from petsc4py import PETSc
+#
+#     A = dolfin.PETScMatrix()
+#     dolfin.assemble(self._jacobian, tensor=A)
+#
+#     norm_frob = A.norm('frobenius')
+#     norm_inf = A.norm('linf')
+#     norm_1 = A.norm('l1')
+#     nnz = A.nnz()
+#
+#     if rank == 0:
+#         print(f"Jacobian size: {A.size(0)} x {A.size(1)}", flush=True)
+#         print(f"Jacobian NNZ: {nnz}", flush=True)
+#         print(f"Jacobian Frobenius norm: {norm_frob:.6e}", flush=True)
+#         print(f"Jacobian linf norm (max row sum): {norm_inf:.6e}", flush=True)
+#         print(f"Jacobian l1 norm (max col sum): {norm_1:.6e}", flush=True)
+#
+#     dolfin.PETScOptions.clear()
+#     dolfin.PETScOptions.set("ksp_type", "preonly")
+#     dolfin.PETScOptions.set("pc_type", "lu")
+#     dolfin.PETScOptions.set("pc_factor_mat_solver_type", "mumps")
+#     dolfin.PETScOptions.set("mat_mumps_icntl_4", "1")   # errors only, no stats dump
+#     self.solver.linear_solver().set_from_options()
+#     return original_solve(self)
+#
+# # ─────────────────────────────────────────────────────────────────
+#
+# mm.MechanicsProblem.solve = patched_solve
 # dolfin.PETScOptions.set("mat_mumps_icntl_14", "200")
 coupling = em_model.setup_EM_model_from_config(
     config,

@@ -67,34 +67,36 @@ class MechanicsNewtonSolver(dolfin.NewtonSolver):
     def default_solver_parameters():
         return {
             "petsc": {
-                "ksp_type": "gmres",
-                "ksp_gmres_restart": 100,
-                "ksp_rtol": 1e-8,
-                "ksp_atol": 1e-10,
-                "ksp_max_it": 500,
-                "pc_type": "gamg",
-                "pc_gamg_type": "agg",
-                "pc_gamg_threshold": 0.02,
-                "mg_levels_ksp_type": "chebyshev",
-                "mg_levels_pc_type": "jacobi",
-                "ksp_monitor_true_residual": "",
+                "ksp_type": "preonly",
+                "ksp_rtol": None,
+                "ksp_atol": None,
+                "ksp_max_it": None,
+                "ksp_norm_type": "preconditioned",
+                "ksp_gmres_restart": None,
+                "pc_type": None,
+                "pc_factor_mat_solver_type": None,
+                "mat_superlu_dist_equil": True,
+                "mat_superlu_dist_rowperm": "LargeDiag_MC64",
+                "mat_superlu_dist_colperm": "PARMETIS",
+                "mat_superlu_dist_parsymbfact": True,
+                "mat_superlu_dist_replacetinypivot": True,
+                "mat_superlu_dist_fact": "DOFACT",
+                "mat_superlu_dist_iterrefine": True,
+                "pc_hypre_type": None,
             },
-            "linear_solver": "gmres",
-            "preconditioner": "gamg",
-            "newton_verbose": False,
-            "ksp_verbose": False,
-            "debug": False,
+            "verbose": False,
+            "linear_solver": "mumps",
+            "preconditioner": "hypre_amg",
+            "error_on_nonconvergence": False,
             "relative_tolerance": 1e-5,
             "absolute_tolerance": 1e-5,
             "maximum_iterations": 20,
-            "report": False,
+            "report": True,
             "krylov_solver": {
-            "nonzero_initial_guess": True,
-            "absolute_tolerance": 1e-10,
-            "relative_tolerance": 1e-10,
-            "maximum_iterations": 1000,
-            "monitor_convergence": False,
-            "error_on_nonconvergence": True,
+                "absolute_tolerance": 1e-13,
+                "relative_tolerance": 1e-13,
+                "maximum_iterations": 1000,
+                "monitor_convergence": False,
             },
             "lu_solver": {"report": False, "symmetric": False, "verbose": False},
         }
@@ -198,6 +200,10 @@ class MechanicsNewtonSolver(dolfin.NewtonSolver):
 class MechanicsNewtonSolver_ODE(MechanicsNewtonSolver):
     def update_solution(self, x, dx, rp, p, i):
         self._update_solution_called = True
+
+        import dolfin as _d
+        if _d.MPI.rank(_d.MPI.comm_world) == 0:
+            print(f"[DX] iter={i} |dx|={dx.norm('l2'):.6e} |x_before|={x.norm('l2'):.6e}", flush=True)
 
         # Update x from the dx obtained from linear solver (Newton iteration) :
         # x = -rp*dx (rp : relax param)

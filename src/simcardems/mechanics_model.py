@@ -44,14 +44,14 @@ def setup_solver(
 
     # Use parameters from Biaxial test in Holzapfel 2019 (Table 1).
     material_parameters = dict(
-        a=0.059,  # kPa
-        a_f=18.472,  # kPa
-        b=8.023,
-        b_f=16.026,
-        a_s=2.481,  # kPa
-        b_s=11.120,
-        a_fs=0.216,  # kPa
-        b_fs=11.436,
+        a=2.28,
+        a_f=1.686,
+        b=9.726,
+        b_f=15.779,
+        a_s=0.0,
+        b_s=0.0,
+        a_fs=0.0,
+        b_fs=0.0,
     )
 
     active_model = ActiveModel(coupling=coupling, parameters=coupling.cell_params())
@@ -85,29 +85,11 @@ def setup_solver(
         debug_mode=debug_mode,
     )
 
-    # Stage 1: scaffold — pin the base, solve the 0.01 kPa reference state
-    init_p = 0.01 if traction is None else traction
-    problem.bcs = boundary_conditions.create_biv_boundary_conditions(
-        geo=coupling.geometry,
-        traction_lv=init_p,
-        traction_rv=init_p,
-        spring=spring,
-        fix_base=True,
-    )
-    problem.solve()
-    logger.info("Fixed-base solve done. Releasing base, re-solving free...")
+    if state_prev is not None:
+        problem.state.assign(state_prev)
 
-    # Stage 2: release base, re-solve free from the warm (held) state
-    problem.bcs = boundary_conditions.create_biv_boundary_conditions(
-        geo=coupling.geometry,
-        traction_lv=init_p,
-        traction_rv=init_p,
-        spring=spring,
-        fix_base=False,
-    )
+    logger.info("MechanicsProblem init done. Starting initial solve...")
     problem.solve()
-    logger.info("Free-base initial solve done.")
-
     logger.info("Initial mechanics solve done.")
     logger.info("Coupling register model")
     coupling.register_mech_model(problem)
@@ -388,7 +370,7 @@ def resolve_boundary_conditions(
             fix_right_plane=fix_right_plane,
         )
     elif isinstance(geo, lvgeometry.LeftVentricularGeometry):
-        initial_pressure = 0.01 if traction is None else traction
+        initial_pressure = 0.001 if traction is None else traction
         return boundary_conditions.create_lv_no_dirichlet_boundary_conditions(
             geo=geo,
             traction=initial_pressure,
@@ -398,7 +380,7 @@ def resolve_boundary_conditions(
         # Small nonzero initial pressure -- avoids a degenerate/singular
         # starting solve given no Dirichlet base constraint, before the
         # cycle controller's first real step() call takes over.
-        initial_pressure = 0.01 if traction is None else traction
+        initial_pressure = 0.001 if traction is None else traction
         return boundary_conditions.create_biv_boundary_conditions(
             geo=geo,
             traction_lv=initial_pressure,

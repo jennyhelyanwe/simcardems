@@ -23,7 +23,10 @@ os.environ["XDG_CACHE_HOME"] = cache_dir
 
 import logging
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
-
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger("simcardems.newton_solver").setLevel(logging.DEBUG)
+logging.getLogger("simcardems.newton_solver").addHandler(logging.StreamHandler())
+logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.DEBUG)
 
 import dolfin
 dolfin.set_log_level(dolfin.LogLevel.DEBUG)
@@ -101,6 +104,7 @@ class LVCycleRunner(Runner):
             t=t_ms,
             dt=dt_ms,
         )
+
         state = self._cycle_controller.lv_state
         if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
             from tqdm import tqdm
@@ -124,6 +128,7 @@ class LVCycleRunner(Runner):
                 vals = ",".join(f"{v:.6f}" for v in self._pseudo_ecg.last_values)
                 self._ecg_file.write(f"{t_ms:.3f},{vals}\n")
                 self._ecg_file.flush()
+
 
     def save_pv_log(self):
         if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
@@ -348,8 +353,9 @@ mpi_print("Configuring...")
 config = Config()
 config.T              = 800.0
 config.dt      = 1.0 # ms — EP timestep
-config.mechanics_solve_strategy = "hybrid"  # or "threshold"
-config.dt_mech = 5.0  # ms
+config.mechanics_solve_strategy = "hybrid"
+config.dt_mech                  = 5.0    # ms — max interval, also triggers if threshold exceeded
+config.mech_threshold           = 1.0   # default — should be fine
 config.geometry_path  = GEO_PATH
 config.outdir         = "output_lv_ellipsoid"
 config.coupling_type  = "fully_coupled_Tor_Land"
@@ -357,8 +363,8 @@ config.coupling_type  = "fully_coupled_Tor_Land"
 config.save_freq      = 20
 # config.linear_mechanics_solver = "gmres"
 config.spring         = 10.0   # kPa/mm epicardial Robin
-config.debug_mode = True
-config.mechanics_use_custom_newton_solver = True
+config.debug_mode = False
+config.mechanics_use_custom_newton_solver = False
 # config.mechanics_use_custom_newton_solver = True
 # config.linear_mechanics_solver = "gmres"
 

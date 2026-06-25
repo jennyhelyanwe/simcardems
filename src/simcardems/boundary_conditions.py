@@ -130,22 +130,44 @@ def create_slab_boundary_conditions(
         robin=robin_bc,
     )
 
-def create_lv_no_dirichlet_boundary_conditions(
-    geo: lvgeometry.LeftVentricularGeometry,
-    traction: typing.Union[dolfin.Constant, float] = None,
-    spring: typing.Union[dolfin.Constant, float] = None,
+def create_biv_boundary_conditions(
+    geo: bivgeometry.BiVentricularGeometry,
+    traction_lv=None,
+    traction_rv=None,
+    spring=None,
 ):
+    import dolfin as _d
+    if _d.MPI.rank(_d.MPI.comm_world) == 0:
+        print("[BC] BASE free, EPI spring, no pressure", flush=True)
+
     neumann_bc = []
-    if traction is not None:
-        neumann_bc.append(
-            pulse.NeumannBC(
-                traction=utils.float_to_constant(traction),
-                marker=geo.markers["ENDO"][0],
-            ),
-        )
+    # if traction_lv is not None:
+    #     neumann_bc.append(pulse.NeumannBC(
+    #         traction=utils.float_to_constant(traction_lv),
+    #         marker=geo.markers["ENDO_LV"][0]))
+    # if traction_rv is not None:
+    #     neumann_bc.append(pulse.NeumannBC(
+    #         traction=utils.float_to_constant(traction_rv),
+    #         marker=geo.markers["ENDO_RV"][0]))
+    if traction_lv is not None:
+        neumann_bc.append(pulse.NeumannBC(
+            traction=utils.float_to_constant(0.0),
+            marker=geo.markers["ENDO_LV"][0]))
+    if traction_rv is not None:
+        neumann_bc.append(pulse.NeumannBC(
+            traction=utils.float_to_constant(0.0),
+            marker=geo.markers["ENDO_RV"][0]))
+
+    # def dirichlet_bc(W):
+    #     return [dolfin.DirichletBC(
+    #         W.sub(0),
+    #         dolfin.Constant((0.0, 0.0, 0.0)),
+    #         geo.ffun,
+    #         geo.markers["EPI"][0])]
 
     robin_bc = []
     if spring is not None:
+        # Pericardium
         robin_bc.append(
             pulse.RobinBC(
                 value=utils.float_to_constant(spring),
@@ -205,41 +227,37 @@ def create_lv_boundary_conditions(
         robin=robin_bc,
     )
 
-def create_biv_boundary_conditions(
-    geo: bivgeometry.BiVentricularGeometry,
-    traction_lv=None,
-    traction_rv=None,
-    spring=None,
-    fix_base: bool = False,
+def create_lv_no_dirichlet_boundary_conditions(
+    geo: lvgeometry.LeftVentricularGeometry,
+    traction: typing.Union[dolfin.Constant, float] = None,
+    spring: typing.Union[dolfin.Constant, float] = None,
 ):
+    logger.debug(
+        f"Calling create_lv_boundary_conditions with geo: {geo!r}, traction: {traction!r} and spring: {spring!r}",
+    )
+
     neumann_bc = []
-    if traction_lv is not None:
-        neumann_bc.append(pulse.NeumannBC(
-            traction=utils.float_to_constant(traction_lv),
-            marker=geo.markers["ENDO_LV"][0]))
-    if traction_rv is not None:
-        neumann_bc.append(pulse.NeumannBC(
-            traction=utils.float_to_constant(traction_rv),
-            marker=geo.markers["ENDO_RV"][0]))
+    if traction is not None:
+        # LV pressure
+        neumann_bc.append(
+            pulse.NeumannBC(
+                traction=utils.float_to_constant(traction),
+                marker=geo.markers["ENDO"][0],
+            ),
+        )
 
     robin_bc = []
     if spring is not None:
-        robin_bc.append(pulse.RobinBC(
-            value=utils.float_to_constant(spring),
-            marker=geo.markers["EPI"][0]))
-
-    dirichlet = ()
-    if fix_base:
-        def dirichlet_bc(W):
-            return [dolfin.DirichletBC(
-                W.sub(0),
-                dolfin.Constant((0.0, 0.0, 0.0)),
-                geo.ffun,
-                geo.markers["BASE"][0])]
-        dirichlet = (dirichlet_bc,)
+        # Pericardium
+        robin_bc.append(
+            pulse.RobinBC(
+                value=utils.float_to_constant(spring),
+                marker=geo.markers["EPI"][0],
+            ),
+        )
 
     return pulse.BoundaryConditions(
-        dirichlet=dirichlet,
+        dirichlet=(),
         neumann=neumann_bc,
         robin=robin_bc,
     )
