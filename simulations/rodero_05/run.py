@@ -191,19 +191,24 @@ biv_geo.stimulus_domain = stim_domain
 mpi_print('Configuring...')
 config = Config()
 config.T                                  = 800.0
-config.dt                                 = 0.05
-config.dt_mech                            = 1.0
+config.dt                                 = 1.0
+config.dt_mech                            = 5.0
 config.geometry_path                      = "rodero_05_fine.h5"
 config.outdir                             = "biv_run_output"
 config.coupling_type                      = "fully_coupled_Tor_Land"
+# config.coupling_type = "explicit_ORdmm_Land"
 config.save_freq                          = 20
-config.linear_mechanics_solver            = "gmres"
+config.linear_mechanics_solver            = "mumps"
 config.spring                             = 10.0
 # config.traction                           = 0.01
 config.traction                           = 0.001
 # config.traction                           = 0.5
-config.mechanics_use_custom_newton_solver = False
+config.mechanics_use_custom_newton_solver = True
 config.mechanics_solve_strategy           = "hybrid"
+config.mech_threshold           = 1.0   # default — should be fine
+config.relaxation_factor = 0.3
+config.set_material = "Guccione"
+config.bnd_rigid = True
 
 
 # ── 5. Spatial fields ──────────────────────────────────────────────────────────
@@ -261,6 +266,9 @@ mpi_print('Setting up EM model...')
 #
 # mm.MechanicsProblem.solve = patched_solve
 # dolfin.PETScOptions.set("mat_mumps_icntl_14", "200")
+dolfin.PETScOptions.set("mat_mumps_icntl_28", "2")  # parallel analysis
+dolfin.PETScOptions.set("mat_mumps_icntl_29", "2")  # ParMETIS ordering
+dolfin.PETScOptions.set("mat_mumps_icntl_14", "200")
 coupling = em_model.setup_EM_model_from_config(
     config,
     geometry=biv_geo,
@@ -269,6 +277,11 @@ coupling = em_model.setup_EM_model_from_config(
     iks_scale_function=iks_fn,
 )
 
+mpi_print(f"State space: {coupling.mech_solver.state_space}")
+mpi_print(f"State space dim: {coupling.mech_solver.state_space.dim()}")
+for i in range(coupling.mech_solver.state_space.num_sub_spaces()):
+    sub = coupling.mech_solver.state_space.sub(i)
+    mpi_print(f"  Sub {i}: {sub.ufl_element()} dim={sub.dim()}")
 
 # ── 7. Cycle controller ────────────────────────────────────────────────────────
 

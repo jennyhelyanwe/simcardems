@@ -198,23 +198,23 @@ def save_biv_geometry(
 # f0, s0, n0 = build_microstructure(mesh, fiber_vectors, sheet_vectors, normal_vectors)
 # save_biv_geometry("our_biv_geo", mesh, ffun, f0, s0, n0, markers, info)
 
-# Read in .csv arrays from Alya_pipeline/meta_data/rodero_05_fine/
+# Read in .csv arrays from Alya_pipeline/meta_data/rodero_05_coarse/
 import pandas as pd
 info = {"mesh_type": MeshTypes.biv_ellipsoid.value}  # == 3
-dir = './rodero_05_fine'
-df = pd.read_csv(dir + '/rodero_05_fine_xyz.csv', header=None)
+dir = './rodero_05_coarse'
+df = pd.read_csv(dir + '/rodero_05_coarse_xyz.csv', header=None)
 node_coords = df.to_numpy() * 10 # Because simcardems is in mm-kPa-ms-g units, and Alya meshes are in cm.
-df = pd.read_csv(dir + '/rodero_05_fine_tetra.csv', header=None)
+df = pd.read_csv(dir + '/rodero_05_coarse_tetra.csv', header=None)
 element_connectivity = df.to_numpy().astype(int)
-df = pd.read_csv(dir + '/rodero_05_fine_triangles.csv', header=None)
+df = pd.read_csv(dir + '/rodero_05_coarse_triangles.csv', header=None)
 surface_triangles = df.to_numpy()
-df = pd.read_csv(dir + '/rodero_05_fine_boundaryelementfield_mechanical-element-boundary-label.csv', header=None)
+df = pd.read_csv(dir + '/rodero_05_coarse_boundaryelementfield_mechanical-element-boundary-label.csv', header=None)
 face_labels = df.to_numpy()
-df = pd.read_csv(dir + '/rodero_05_fine_nodefield_fibre.csv', header=None)
+df = pd.read_csv(dir + '/rodero_05_coarse_nodefield_fibre.csv', header=None)
 fibre_vectors = df.to_numpy()
-df = pd.read_csv(dir + '/rodero_05_fine_nodefield_sheet.csv', header=None)
+df = pd.read_csv(dir + '/rodero_05_coarse_nodefield_sheet.csv', header=None)
 sheet_vectors = df.to_numpy()
-df = pd.read_csv(dir + '/rodero_05_fine_nodefield_normal.csv', header=None)
+df = pd.read_csv(dir + '/rodero_05_coarse_nodefield_normal.csv', header=None)
 nornaml_vectors = df.to_numpy()
 
 import pyvista as pv
@@ -313,6 +313,6 @@ save_biv_geometry(dir, mesh, ffun, f0, s0, n0, markers, info)
 
 # FOR NOW! Remove EP refinement to speed up debug process. When actually running, do include refinement.
 import h5py
-with h5py.File("rodero_05_fine.h5", "a") as hf:
+with h5py.File("rodero_05_coarse.h5", "a") as hf:
     hf["info"].create_dataset("num_refinements", data=0)
 

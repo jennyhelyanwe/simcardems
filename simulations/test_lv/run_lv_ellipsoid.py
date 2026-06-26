@@ -23,10 +23,10 @@ os.environ["XDG_CACHE_HOME"] = cache_dir
 
 import logging
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
-logging.basicConfig(level=logging.DEBUG)
-logging.getLogger("simcardems.newton_solver").setLevel(logging.DEBUG)
-logging.getLogger("simcardems.newton_solver").addHandler(logging.StreamHandler())
-logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.DEBUG)
+# logging.basicConfig(level=logging.DEBUG)
+# logging.getLogger("simcardems.newton_solver").setLevel(logging.DEBUG)
+# logging.getLogger("simcardems.newton_solver").addHandler(logging.StreamHandler())
+# logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.DEBUG)
 
 import dolfin
 dolfin.set_log_level(dolfin.LogLevel.DEBUG)
@@ -365,6 +365,7 @@ config.save_freq      = 20
 config.spring         = 10.0   # kPa/mm epicardial Robin
 config.debug_mode = False
 config.mechanics_use_custom_newton_solver = False
+config.set_material = "Guccione"
 # config.mechanics_use_custom_newton_solver = True
 # config.linear_mechanics_solver = "gmres"
 
