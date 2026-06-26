@@ -33,6 +33,7 @@ def load_geometry(
 ) -> "BaseGeometry":
     from .slabgeometry import SlabGeometry
     from .lvgeometry import LeftVentricularGeometry
+    from .bivgeometry import BiVentricularGeometry
 
     if mesh_path == "":
         # Use default slab geometry

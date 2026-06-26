@@ -22,6 +22,14 @@ if typing.TYPE_CHECKING:
 logger = utils.getLogger(__name__)
 
 
+class NearlyIncompressibleHO(pulse.HolzapfelOgden):
+    def __init__(self, *args, kappa=1e3, **kwargs):
+        self.kappa = kappa
+        super().__init__(*args, **kwargs)
+
+    def compressibility(self, p, J):
+        return self.kappa / 2.0 * (J - 1.0) ** 2 - p * (J - 1.0)
+
 def setup_solver(
     coupling: em_model.BaseEMCoupling,
     ActiveModel,
@@ -32,7 +40,7 @@ def setup_solver(
     fix_right_plane: bool = config.Config.fix_right_plane,
     debug_mode: bool = config.Config.debug_mode,
     set_material: str = "",
-    linear_solver="mumps",
+    linear_solver="gmres",
     use_custom_newton_solver: bool = config.Config.mechanics_use_custom_newton_solver,
     state_prev=None,
 ):
@@ -55,9 +63,15 @@ def setup_solver(
     )
 
     active_model = ActiveModel(coupling=coupling, parameters=coupling.cell_params())
-    material = pulse.HolzapfelOgden(
+    # material = pulse.HolzapfelOgden(
+    #     active_model=active_model,
+    #     parameters=material_parameters,
+    # )
+    print('Using Nearly Incompressible HO')
+    material = NearlyIncompressibleHO(
         active_model=active_model,
         parameters=material_parameters,
+        kappa=1e3,
     )
 
     if set_material == "Guccione":
@@ -186,12 +200,18 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
         internal_energy = self.material.strain_energy(
             self._F,
         ) + self.material.compressibility(p, self._J)
+        #
+        # kappa = dolfin.Constant(500.0)  # bulk modulus (kPa), nearly-incompressible penalty
+        # internal_energy = self.material.strain_energy(
+        #     self._F,
+        # ) + self.material.compressibility(p, self._J) + 0.5 * kappa * (self._J - 1.0) ** 2
 
         self._virtual_work = dolfin.derivative(
             internal_energy * dx,
             self.state,
             self.state_test,
         )
+        # print('self.strong_coupling: ', self.strong_coupling)
 
         if self.strong_coupling:
             f0 = self.material.active.f0
@@ -200,7 +220,11 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
             # Use frozen Ta_current for both residual and Jacobian to avoid
             # JIT hang from ufl.min_value/ufl.max_value in symbolic Ta(lmbda)
             Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
+            # print('Pa_frozen', Pa_frozen)
+            # print('Ta(lmbda):' , self.material.active.Ta(lmbda))
+            # print('lmbda: ', lmbda)
             self._virtual_work += dolfin.inner(Pa_frozen, dolfin.grad(v)) * dx
+            # print('virtual work add: ', dolfin.inner(Pa_frozen, dolfin.grad(v)) * dx)
 
         external_work = self._external_work(u, v)
         if external_work is not None:
@@ -212,6 +236,8 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
             self.state,
             dolfin.TrialFunction(self.state_space),
         )
+        # print('jacobian', self._jacobian)
+        # quit()
         if init_solver:
             self._init_solver()
 
@@ -254,6 +280,8 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
                 )
 
             self.material.active._projector.project(self.material.active.Ta_current, self.material.active.Ta(lmbda))
+            # print('self.material.active.Ta(lmbda)', self.material.active.Ta(lmbda))
+            # quit()
             self.material.active.update_current(lmbda=lmbda)
             self.material.active.update_prev()
 
@@ -353,6 +381,30 @@ class RigidMotionProblem(MechanicsProblem):
 
         return sum(dolfin.dot(u, zi) * r[i] * dolfin.dx for i, zi in enumerate(RM))
 
+    def solve(self):
+        self._init_forms(init_solver=False)
+        newton_iteration, newton_converged = self.solver.solve()
+        getattr(self.solver, "check_overloads_called", None)
+
+        if self.strong_coupling:
+            p, u, r = self.state.split(deepcopy=True)  # note: p, u, r order
+
+            F = dolfin.grad(u) + dolfin.Identity(3)
+            f = F * self.material.active.f0
+            lmbda = dolfin.sqrt(f ** 2)
+
+            self.material.active._projector.project(self.material.active.lmbda, lmbda)
+            if self.material.active.dt > 0:
+                self.material.active._projector.project(
+                    self.material.active._dLambda,
+                    (lmbda - self.material.active.lmbda_prev) / self.material.active.dt,
+                )
+
+            self.material.active._projector.project(self.material.active.Ta_current, self.material.active.Ta(lmbda))
+            self.material.active.update_current(lmbda=lmbda)
+            self.material.active.update_prev()
+
+        return newton_iteration, newton_converged
 
 def resolve_boundary_conditions(
     geo: geometry.BaseGeometry,
@@ -399,16 +451,12 @@ def create_problem(
     traction: typing.Union[dolfin.Constant, float] = None,
     spring: typing.Union[dolfin.Constant, float] = None,
     fix_right_plane: bool = config.Config.fix_right_plane,
-    linear_solver="mumps",
+    linear_solver="gmres",
     use_custom_newton_solver: bool = config.Config.mechanics_use_custom_newton_solver,
     debug_mode=config.Config.debug_mode,
 ) -> MechanicsProblem:
     Problem = MechanicsProblem
     if bnd_rigid:
-        if not isinstance(geo, slabgeometry.SlabGeometry):
-            raise RuntimeError(
-                "Can only use Rigid boundary conditions with SlabGeometry",
-            )
         bcs = None
         Problem = RigidMotionProblem
     else:
@@ -426,15 +474,23 @@ def create_problem(
         material,
         bcs,
         solver_parameters={
-            "linear_solver": linear_solver,
+            "petsc": {
+                "ksp_type": "gmres",
+                "pc_type": "bjacobi",
+                "sub_pc_type": "ilu",
+                "ksp_max_it": 1000,
+                "ksp_rtol": 1e-5,
+                "ksp_gmres_restart": 100,
+            },
+            "linear_solver": "gmres",
+            "preconditioner": "bjacobi",
             "verbose": verbose,
             "debug": debug_mode,
-            "preconditioner": "hypre_amg",
             "error_on_nonconvergence": False,
             "relative_tolerance": 1e-5,
             "absolute_tolerance": 1e-5,
             "maximum_iterations": 20,
-            "report": True,  # ADD THIS
+            "report": True,
         },
         use_custom_newton_solver=use_custom_newton_solver,
     )

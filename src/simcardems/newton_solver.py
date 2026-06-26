@@ -22,7 +22,8 @@ class MechanicsNewtonSolver(dolfin.NewtonSolver):
         self._update_cb = update_cb
 
         # Initializing Newton solver (parent class)
-        self.petsc_solver = dolfin.PETScKrylovSolver()
+        # self.petsc_solver = dolfin.PETScKrylovSolver()
+        self.petsc_solver = dolfin.PETScKrylovSolver("gmres", "hypre_amg")
         super().__init__(
             self._state.function_space().mesh().mpi_comm(),
             self.petsc_solver,
@@ -56,6 +57,8 @@ class MechanicsNewtonSolver(dolfin.NewtonSolver):
             self.parameters["lu_solver"]["verbose"] = True
             self.parameters["krylov_solver"]["monitor_convergence"] = True
             dolfin.PETScOptions.set("ksp_monitor_true_residual")
+        self.parameters["linear_solver"] = "gmres"
+        self.parameters["preconditioner"] = "hypre_amg"
         self.linear_solver().set_from_options()
         self._residual_index = 0
         self._residuals = []
@@ -63,43 +66,104 @@ class MechanicsNewtonSolver(dolfin.NewtonSolver):
     def register_datacollector(self, datacollector):
         self._datacollector = datacollector
 
+    # @staticmethod
+    # def default_solver_parameters():
+    #     return {
+    #         "petsc": {
+    #             "ksp_type": "preonly",
+    #             # "ksp_type": "gmres",
+    #             "pc_type": "lu",
+    #             "pc_factor_mat_solver_type": "mumps",
+    #             "mat_mumps_icntl_33": 0,
+    #         },
+    #         "newton_verbose": False,
+    #         "ksp_verbose": False,
+    #         "debug": False,
+    #         "linear_solver": "mumps",
+    #         # "linear_solver": "gmres",
+    #         "error_on_nonconvergence": True,
+    #         "relative_tolerance": 1e-5,
+    #         "absolute_tolerance": 1e-5,
+    #         "maximum_iterations": 20,
+    #         "report": False,
+    #         "krylov_solver": {
+    #             "nonzero_initial_guess": True,
+    #             "absolute_tolerance": 1e-10,
+    #             "relative_tolerance": 1e-10,
+    #             "maximum_iterations": 1000,
+    #             "monitor_convergence": False,
+    #         },
+    #         "lu_solver": {"report": False, "symmetric": False, "verbose": False},
+    #     }
+
     @staticmethod
     def default_solver_parameters():
         return {
             "petsc": {
-                "ksp_type": "preonly",
-                "ksp_rtol": None,
-                "ksp_atol": None,
-                "ksp_max_it": None,
-                "ksp_norm_type": "preconditioned",
-                "ksp_gmres_restart": None,
-                "pc_type": None,
-                "pc_factor_mat_solver_type": None,
-                "mat_superlu_dist_equil": True,
-                "mat_superlu_dist_rowperm": "LargeDiag_MC64",
-                "mat_superlu_dist_colperm": "PARMETIS",
-                "mat_superlu_dist_parsymbfact": True,
-                "mat_superlu_dist_replacetinypivot": True,
-                "mat_superlu_dist_fact": "DOFACT",
-                "mat_superlu_dist_iterrefine": True,
-                "pc_hypre_type": None,
+                "ksp_type": "gmres",
+                "pc_type": "hypre",
+                "pc_hypre_type": "boomeramg",
+                "ksp_max_it": 500,
+                "ksp_rtol": 1e-5,
+                "ksp_gmres_restart": 100,
             },
-            "verbose": False,
-            "linear_solver": "mumps",
+            "newton_verbose": False,
+            "ksp_verbose": False,
+            "debug": False,
+            "linear_solver": "gmres",
             "preconditioner": "hypre_amg",
-            "error_on_nonconvergence": False,
+            "error_on_nonconvergence": True,
             "relative_tolerance": 1e-5,
             "absolute_tolerance": 1e-5,
             "maximum_iterations": 20,
-            "report": True,
+            "report": False,
             "krylov_solver": {
-                "absolute_tolerance": 1e-13,
-                "relative_tolerance": 1e-13,
+                "nonzero_initial_guess": True,
+                "absolute_tolerance": 1e-10,
+                "relative_tolerance": 1e-10,
                 "maximum_iterations": 1000,
                 "monitor_convergence": False,
             },
             "lu_solver": {"report": False, "symmetric": False, "verbose": False},
         }
+
+    # @staticmethod
+    # def default_solver_parameters():
+    #     return {
+    #         "petsc": {
+    #             "ksp_type": "preonly",
+    #             "ksp_rtol": None,
+    #             "ksp_atol": None,
+    #             "ksp_max_it": None,
+    #             "ksp_norm_type": "preconditioned",
+    #             "ksp_gmres_restart": None,
+    #             "pc_type": None,
+    #             "pc_factor_mat_solver_type": None,
+    #             "mat_superlu_dist_equil": True,
+    #             "mat_superlu_dist_rowperm": "LargeDiag_MC64",
+    #             "mat_superlu_dist_colperm": "PARMETIS",
+    #             "mat_superlu_dist_parsymbfact": True,
+    #             "mat_superlu_dist_replacetinypivot": True,
+    #             "mat_superlu_dist_fact": "DOFACT",
+    #             "mat_superlu_dist_iterrefine": True,
+    #             "pc_hypre_type": None,
+    #         },
+    #         "verbose": False,
+    #         "linear_solver": "mumps",
+    #         "preconditioner": "hypre_amg",
+    #         "error_on_nonconvergence": False,
+    #         "relative_tolerance": 1e-5,
+    #         "absolute_tolerance": 1e-5,
+    #         "maximum_iterations": 20,
+    #         "report": True,
+    #         "krylov_solver": {
+    #             "absolute_tolerance": 1e-13,
+    #             "relative_tolerance": 1e-13,
+    #             "maximum_iterations": 1000,
+    #             "monitor_convergence": False,
+    #         },
+    #         "lu_solver": {"report": False, "symmetric": False, "verbose": False},
+    #     }
 
     def converged(self, r, p, i):
         self._converged_called = True
@@ -133,50 +197,6 @@ class MechanicsNewtonSolver(dolfin.NewtonSolver):
 
     def solver_setup(self, A, J, p, i):
         self._solver_setup_called = True
-
-        if not getattr(self, "_gamg_configured", False):
-            import dolfin
-            from petsc4py import PETSc
-
-            W = self._state.function_space()
-            Vd = W.sub(0).collapse()
-            gdim = W.mesh().geometry().dim()
-
-            builders = []
-            for k in range(gdim):
-                vec = [0.0] * gdim;
-                vec[k] = 1.0
-                builders.append(dolfin.Constant(tuple(vec)))
-            if gdim == 3:
-                for e in [("0.0", "-x[2]", "x[1]"),
-                          ("x[2]", "0.0", "-x[0]"),
-                          ("-x[1]", "x[0]", "0.0")]:
-                    builders.append(dolfin.Expression(e, degree=1))
-
-            mode_vecs = []
-            for expr in builders:
-                d = dolfin.Function(Vd);
-                d.interpolate(expr)
-                m = dolfin.Function(W);
-                dolfin.assign(m.sub(0), d)
-                mode_vecs.append(dolfin.as_backend_type(m.vector()).vec().copy())
-
-            # orthonormalise via Gram-Schmidt (GAMG wants an orthonormal basis)
-            for a in range(len(mode_vecs)):
-                for b in range(a):
-                    dot = mode_vecs[a].dot(mode_vecs[b])
-                    mode_vecs[a].axpy(-dot, mode_vecs[b])
-                nrm = mode_vecs[a].norm()
-                if nrm > 0:
-                    mode_vecs[a].scale(1.0 / nrm)
-
-            nsp = PETSc.NullSpace().create(
-                constant=False, vectors=mode_vecs, comm=W.mesh().mpi_comm()
-            )
-            dolfin.as_backend_type(A).mat().setNearNullSpace(nsp)
-            self._rbm_nsp = nsp  # keep alive — don't let it get GC'd
-            self._gamg_configured = True
-
         super().solver_setup(A, J, p, i)
 
     def solve(self):
@@ -198,22 +218,44 @@ class MechanicsNewtonSolver(dolfin.NewtonSolver):
 
 
 class MechanicsNewtonSolver_ODE(MechanicsNewtonSolver):
+    # def update_solution(self, x, dx, rp, p, i):
+    #     self._update_solution_called = True
+    #
+    #     import dolfin as _d
+    #     if _d.MPI.rank(_d.MPI.comm_world) == 0:
+    #         print(f"[DX] iter={i} |dx|={dx.norm('l2'):.6e} |x_before|={x.norm('l2'):.6e}", flush=True)
+    #
+    #     # Update x from the dx obtained from linear solver (Newton iteration) :
+    #     # x = -rp*dx (rp : relax param)
+    #     super().update_solution(x, dx, rp, p, i)
+    #
+    #     # Updating form of MechanicsProblem (from current lmbda, zetas, zetaw, ...)
+    #     self._state.vector().set_local(x)
+    #     # self._mech_problem._init_forms()
+    #     # Recompute Zetas, Zetaw, Ta, lmbda
+    #     # self._mech_problem.material.active.update_prev()
+    #     self._update_cb()
+    #     # Re-init this solver with the new problem (note : done in _init_forms)
+    #     # self.__init__(self._mech_problem)
+
     def update_solution(self, x, dx, rp, p, i):
         self._update_solution_called = True
-
-        import dolfin as _d
-        if _d.MPI.rank(_d.MPI.comm_world) == 0:
-            print(f"[DX] iter={i} |dx|={dx.norm('l2'):.6e} |x_before|={x.norm('l2'):.6e}", flush=True)
-
-        # Update x from the dx obtained from linear solver (Newton iteration) :
-        # x = -rp*dx (rp : relax param)
         super().update_solution(x, dx, rp, p, i)
-
-        # Updating form of MechanicsProblem (from current lmbda, zetas, zetaw, ...)
         self._state.vector().set_local(x)
-        # self._mech_problem._init_forms()
-        # Recompute Zetas, Zetaw, Ta, lmbda
-        # self._mech_problem.material.active.update_prev()
+        self._state.vector().apply("insert")
+
+        # check det(F) of the candidate state
+        import dolfin
+        u = self._state.split(deepcopy=True)[0]
+        F = dolfin.Identity(3) + dolfin.grad(u)
+        DG0 = dolfin.FunctionSpace(self._state.function_space().mesh(), "DG", 0)
+        Jp = dolfin.project(dolfin.det(F), DG0).vector().get_local()
+        rank = dolfin.MPI.rank(dolfin.MPI.comm_world)
+        if len(Jp) and (Jp <= 0).any():
+            idx = Jp.argmin()
+            c = dolfin.Cell(self._state.function_space().mesh(), idx).midpoint()
+            print(
+                f"[detF] iter{i} rank{rank}: min={Jp.min():.3e} n_bad={(Jp <= 0).sum()} worst@({c.x():.1f},{c.y():.1f},{c.z():.1f})",
+                flush=True)
+
         self._update_cb()
-        # Re-init this solver with the new problem (note : done in _init_forms)
-        # self.__init__(self._mech_problem)

@@ -138,7 +138,7 @@ def create_biv_boundary_conditions(
 ):
     import dolfin as _d
     if _d.MPI.rank(_d.MPI.comm_world) == 0:
-        print("[BC] BASE free, EPI spring, no pressure", flush=True)
+        print("[BC] BASE fixed, EPI free, no pressure", flush=True)
 
     neumann_bc = []
     # if traction_lv is not None:
@@ -163,22 +163,36 @@ def create_biv_boundary_conditions(
     #         W.sub(0),
     #         dolfin.Constant((0.0, 0.0, 0.0)),
     #         geo.ffun,
-    #         geo.markers["EPI"][0])]
+    #         geo.markers["EPI"][0]), dolfin.DirichletBC(
+    #         W.sub(0),
+    #         dolfin.Constant((0.0, 0.0, 0.0)),
+    #         geo.ffun,
+    #         geo.markers["BASE"][0]),]
+
+    # def dirichlet_bc(W):
+    #     return [
+    #         dolfin.DirichletBC(W.sub(0), dolfin.Constant((0, 0, 0)), geo.ffun, geo.markers["EPI"][0]),
+            # dolfin.DirichletBC(W.sub(0), dolfin.Constant((0, 0, 0)), geo.ffun, geo.markers["BASE"][0]),
+        # ]
+
 
     robin_bc = []
     if spring is not None:
         # Pericardium
-        robin_bc.append(
+        robin_bc = [
             pulse.RobinBC(
                 value=utils.float_to_constant(spring),
                 marker=geo.markers["EPI"][0],
-            ),
-        )
+            )]
+            # pulse.RobinBC(
+            #     value=utils.float_to_constant(spring),
+            #     marker=geo.markers["BASE"][0],
+            # )]
 
     return pulse.BoundaryConditions(
         dirichlet=(),
         neumann=neumann_bc,
-        robin=robin_bc,
+        robin=(robin_bc),
     )
 
 def create_lv_boundary_conditions(
