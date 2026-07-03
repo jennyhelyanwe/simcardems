@@ -134,26 +134,46 @@ print("  Saved mesh and ffun.")
 
 print("Step 6: Interpolating fibres from fine mesh...")
 
-VFS_fine = dolfin.VectorFunctionSpace(fine_mesh, "DG", 0)
-f0_fine = dolfin.Function(VFS_fine)
-s0_fine = dolfin.Function(VFS_fine)
-n0_fine = dolfin.Function(VFS_fine)
+# Read fine mesh fibres as P1 (how they were written by build_microstructure)
+VFS_fine_p1 = dolfin.VectorFunctionSpace(fine_mesh, "P", 1)
+f0_fine = dolfin.Function(VFS_fine_p1)
+s0_fine = dolfin.Function(VFS_fine_p1)
+n0_fine = dolfin.Function(VFS_fine_p1)
 
 with dolfin.HDF5File(fine_mesh.mpi_comm(), "rodero_05_fine.h5", "r") as f:
     f.read(f0_fine, "microstructure/f0")
     f.read(s0_fine, "microstructure/s0")
     f.read(n0_fine, "microstructure/n0")
 
+# Extract nodal values using vertex_to_dof_map to handle DOF ordering correctly
+v2d = dolfin.vertex_to_dof_map(VFS_fine_p1)
+fine_topo = fine_mesh.cells()  # (n_cells, 4)
+n_fine_vertices = fine_mesh.num_vertices()
+
+def p1_to_cell_centres(fn):
+    """Average P1 nodal values over the 4 corner nodes of each tet."""
+    raw = fn.vector().get_local()
+    nodes = np.zeros((n_fine_vertices, 3))
+    for i in range(n_fine_vertices):
+        nodes[i] = raw[v2d[3*i:3*i+3]]
+    return nodes[fine_topo].mean(axis=1)  # (n_cells, 3)
+
+f0_vals = p1_to_cell_centres(f0_fine)
+s0_vals = p1_to_cell_centres(s0_fine)
+n0_vals = p1_to_cell_centres(n0_fine)
+
+print(f"  Fine mesh zero f0: {np.sum(np.linalg.norm(f0_vals, axis=1) < 1e-10)} / {len(f0_vals)}")
+
+# Build KD-tree from fine cell centres and query with coarse cell centres
 fine_cell_centres = np.array([cell.midpoint().array() for cell in dolfin.cells(fine_mesh)])
-tree_fine_cells = cKDTree(fine_cell_centres)
-
+tree_fine = cKDTree(fine_cell_centres)
 coarse_cell_centres = np.array([cell.midpoint().array() for cell in dolfin.cells(dolfin_mesh)])
-_, idx = tree_fine_cells.query(coarse_cell_centres)
+_, idx = tree_fine.query(coarse_cell_centres)
 
-f0_vals = f0_fine.vector().get_local().reshape(-1, 3)
-s0_vals = s0_fine.vector().get_local().reshape(-1, 3)
-n0_vals = n0_fine.vector().get_local().reshape(-1, 3)
+print(f"  Fine cell centres range: {fine_cell_centres.min():.3f} to {fine_cell_centres.max():.3f}")
+print(f"  Coarse cell centres range: {coarse_cell_centres.min():.3f} to {coarse_cell_centres.max():.3f}")
 
+# Assign to coarse DG0 functions
 VFS_coarse = dolfin.VectorFunctionSpace(dolfin_mesh, "DG", 0)
 f0_coarse = dolfin.Function(VFS_coarse)
 s0_coarse = dolfin.Function(VFS_coarse)
@@ -178,6 +198,44 @@ with dolfin.HDF5File(dolfin_mesh.mpi_comm(), "rodero_05_coarse_4mm.h5", "a") as 
     f.write(n0_coarse, "microstructure/n0")
 
 print("  Fibres saved.")
+
+# ── Quality check: fibre orthonormality ──────────────────────────────────────
+print("Quality checking fibres...")
+
+with dolfin.HDF5File(dolfin_mesh.mpi_comm(), "rodero_05_coarse_4mm.h5", "r") as f:
+    f0_check = dolfin.Function(dolfin.VectorFunctionSpace(dolfin_mesh, "DG", 0))
+    s0_check = dolfin.Function(dolfin.VectorFunctionSpace(dolfin_mesh, "DG", 0))
+    n0_check = dolfin.Function(dolfin.VectorFunctionSpace(dolfin_mesh, "DG", 0))
+    f.read(f0_check, "microstructure/f0")
+    f.read(s0_check, "microstructure/s0")
+    f.read(n0_check, "microstructure/n0")
+
+f0_arr = f0_check.vector().get_local().reshape(-1, 3)
+s0_arr = s0_check.vector().get_local().reshape(-1, 3)
+n0_arr = n0_check.vector().get_local().reshape(-1, 3)
+
+f0_norms = np.linalg.norm(f0_arr, axis=1)
+s0_norms = np.linalg.norm(s0_arr, axis=1)
+n0_norms = np.linalg.norm(n0_arr, axis=1)
+
+print(f"  f0 norms: min={f0_norms.min():.6f} max={f0_norms.max():.6f}")
+print(f"  s0 norms: min={s0_norms.min():.6f} max={s0_norms.max():.6f}")
+print(f"  n0 norms: min={n0_norms.min():.6f} max={n0_norms.max():.6f}")
+print(f"  Zero f0: {np.sum(f0_norms < 1e-10)}")
+print(f"  Zero s0: {np.sum(s0_norms < 1e-10)}")
+print(f"  Zero n0: {np.sum(n0_norms < 1e-10)}")
+print(f"  f0·s0 max: {np.abs(np.sum(f0_arr*s0_arr, axis=1)).max():.6f}")
+print(f"  f0·n0 max: {np.abs(np.sum(f0_arr*n0_arr, axis=1)).max():.6f}")
+print(f"  s0·n0 max: {np.abs(np.sum(s0_arr*n0_arr, axis=1)).max():.6f}")
+
+# Fine mesh coordinate range check
+print(f"  Fine cell centres range: {fine_cell_centres.min():.3f} to {fine_cell_centres.max():.3f} (should be in mm)")
+print(f"  Coarse cell centres range: {coarse_cell_centres.min():.3f} to {coarse_cell_centres.max():.3f} (should be in mm)")
+
+if np.sum(f0_norms < 1e-10) > 0:
+    print(f"  WARNING: {np.sum(f0_norms < 1e-10)} elements have zero fibre norm!")
+else:
+    print("  All fibre norms OK.")
 
 print(f"Final mesh: {dolfin_mesh.num_cells()} cells, {dolfin_mesh.num_vertices()} vertices")
 

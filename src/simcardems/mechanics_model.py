@@ -197,9 +197,16 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
         self._J = pulse.Jacobian(self._F)
         dx = self.geometry.dx
 
-        internal_energy = self.material.strain_energy(
-            self._F,
-        ) + self.material.compressibility(p, self._J)
+        valve_mask = getattr(self.geometry, 'valve_mask', None)
+        if valve_mask is not None:
+            # Stiff Neo-Hookean for valve plug elements
+            stiffness_scale = valve_mask * dolfin.Constant(50.0) + (1.0 - valve_mask) * dolfin.Constant(1.0)
+            internal_energy = (
+                    stiffness_scale * self.material.strain_energy(self._F)
+                    + self.material.compressibility(p, self._J)
+            )
+        else:
+            internal_energy = self.material.strain_energy(self._F) + self.material.compressibility(p, self._J)
         #
         # kappa = dolfin.Constant(500.0)  # bulk modulus (kPa), nearly-incompressible penalty
         # internal_energy = self.material.strain_energy(
@@ -219,7 +226,13 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
             lmbda = dolfin.sqrt(f ** 2)
             # Use frozen Ta_current for both residual and Jacobian to avoid
             # JIT hang from ufl.min_value/ufl.max_value in symbolic Ta(lmbda)
-            Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
+            valve_mask = getattr(self.geometry, 'valve_mask', None)
+            if valve_mask is not None:
+                myocardium = 1.0 - valve_mask
+                Pa_frozen = myocardium * self.material.active.Ta_current * dolfin.outer(f, f0)
+            else:
+                Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
+            # Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
             # print('Pa_frozen', Pa_frozen)
             # print('Ta(lmbda):' , self.material.active.Ta(lmbda))
             # print('lmbda: ', lmbda)
@@ -353,7 +366,13 @@ class RigidMotionProblem(MechanicsProblem):
 
         # Use frozen Ta_current for Jacobian — avoids JIT hang from
         # differentiating through ufl.min_value/ufl.max_value in Ta(lmbda)
-        Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
+        valve_mask = getattr(self.geometry, 'valve_mask', None)
+        if valve_mask is not None:
+            myocardium = 1.0 - valve_mask
+            Pa_frozen = myocardium * self.material.active.Ta_current * dolfin.outer(f, f0)
+        else:
+            Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
+        # Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
         virtual_work_for_jacobian = (
                 self._virtual_work
                 - dolfin.inner(Pa, dolfin.grad(v)) * dx

@@ -155,14 +155,31 @@ biv_geo = BiVentricularGeometry.from_geometry(
     ffun_ep=geo.ffun,
 )
 mpi_print(f"Mesh vertices: {biv_geo.ep_mesh.num_vertices()}")
-# import numpy as np
-# f0_arr = biv_geo.microstructure.f0.vector().get_local().reshape(-1, 3)
-# s0_arr = biv_geo.microstructure.s0.vector().get_local().reshape(-1, 3)
-# n0_arr = biv_geo.microstructure.n0.vector().get_local().reshape(-1, 3)
-# mpi_print(f"|f0| min={np.linalg.norm(f0_arr, axis=1).min():.6f} max={np.linalg.norm(f0_arr, axis=1).max():.6f}")
-# mpi_print(f"|s0| min={np.linalg.norm(s0_arr, axis=1).min():.6f} max={np.linalg.norm(s0_arr, axis=1).max():.6f}")
-# mpi_print(f"|n0| min={np.linalg.norm(n0_arr, axis=1).min():.6f} max={np.linalg.norm(n0_arr, axis=1).max():.6f}")
-# quit()
+
+import numpy as np
+from scipy.spatial import cKDTree
+
+# Load valve plug mask
+coarse_tv = np.load('./rodero_05_coarse_tv.npy')
+is_valve = (coarse_tv >= 7).astype(float)  # 1.0 for valve, 0.0 for myocardium
+
+# Create DG0 function for valve mask
+
+from simcardems.spatial_fields import map_dense_field_to_dg0_function
+
+# Use coarse cell centres as the "dense field" coordinates
+coarse_centres_all = np.array([cell.midpoint().array()
+                                for cell in dolfin.cells(biv_geo.mechanics_mesh)])
+is_valve_float = (coarse_tv >= 7).astype(float)
+
+valve_fn = map_dense_field_to_ep_mesh(
+    biv_geo.mechanics_mesh,
+    coarse_centres_all,
+    is_valve_float,
+)
+
+mpi_print(f'Valve plug elements: {int(is_valve.sum())}')
+biv_geo.valve_mask = valve_fn
 
 # ── 2. Activation times ────────────────────────────────────────────────────────
 
