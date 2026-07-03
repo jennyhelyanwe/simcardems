@@ -148,7 +148,7 @@ mpi_print('Build geometry...')
 from cardiac_geometries.geometry import Geometry
 from simcardems.bivgeometry import BiVentricularGeometry
 
-geo = Geometry.from_file("rodero_05_coarse.h5")
+geo = Geometry.from_file("rodero_05_coarse_4mm.h5")
 biv_geo = BiVentricularGeometry.from_geometry(
     geo,
     ep_mesh=geo.mesh,
@@ -205,7 +205,7 @@ config = Config()
 config.T                                  = 800.0
 config.dt                                 = 1.0
 config.dt_mech                            = 5.0
-config.geometry_path                      = "rodero_05_coarse.h5"
+config.geometry_path                      = "rodero_05_coarse_4mm.h5"
 config.outdir                             = "biv_coarse_run_output"
 config.coupling_type                      = "fully_coupled_Tor_Land"
 config.save_freq                          = 20
@@ -235,46 +235,6 @@ iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
 # ── 6. EM coupling ─────────────────────────────────────────────────────────────
 
 mpi_print('Setting up EM model...')
-# import simcardems.boundary_conditions as _bcs
-# _original_create_biv = _bcs.create_biv_boundary_conditions
-#
-# def _patched_create_biv(geo, traction_lv=None, traction_rv=None, spring=None):
-#     from functools import partial
-#     import dolfin
-#     import pulse
-#
-#     lv_pressure = dolfin.Constant(0.0) # _bcs.utils.float_to_constant(traction_lv) if traction_lv is not None else dolfin.Constant(0.0)
-#     rv_pressure = dolfin.Constant(0.0)  # RV fixed at zero
-#
-#     neumann_bc = [
-#         pulse.NeumannBC(traction=lv_pressure, marker=geo.markers["ENDO_LV"][0]),
-#         pulse.NeumannBC(traction=rv_pressure, marker=geo.markers["ENDO_RV"][0]),
-#     ]
-#
-#     dirichlet_bc = [
-#         partial(
-#             lambda W, ffun, marker: dolfin.DirichletBC(
-#                 W.sub(0), dolfin.Constant((0, 0, 0)), ffun, marker
-#             ),
-#             ffun=geo.ffun,
-#             marker=geo.markers["EPI"][0],
-#         ),
-#         partial(
-#             lambda W, ffun, marker: dolfin.DirichletBC(
-#                 W.sub(0), dolfin.Constant((0, 0, 0)), ffun, marker
-#             ),
-#             ffun=geo.ffun,
-#             marker=geo.markers["BASE"][0],
-#         ),
-#     ]
-#
-#     return pulse.BoundaryConditions(
-#         dirichlet=dirichlet_bc,
-#         neumann=neumann_bc,
-#         robin=[],
-#     )
-#
-# _bcs.create_biv_boundary_conditions = _patched_create_biv
 coupling = em_model.setup_EM_model_from_config(
     config,
     geometry=biv_geo,
@@ -327,7 +287,7 @@ lv_params = CycleParams(
     preload_pressure=0.5,
     prestress_pressure=0.0,
     t_end_diastole=100.0,
-    p_end_diastole=1.0,
+    p_end_diastole=0.8,
     gain_contraction=(1.0, 0.5),
     gain_relaxation=(0.5, 0.2),
     p_fill=0.1,
@@ -346,7 +306,7 @@ rv_params = CycleParams(
     preload_pressure=0.17,
     prestress_pressure=0.0,
     t_end_diastole=100.0,
-    p_end_diastole=0.33,
+    p_end_diastole=0.2,
     gain_contraction=(1.0, 0.5),
     gain_relaxation=(0.5, 0.2),
     p_fill=0.033,

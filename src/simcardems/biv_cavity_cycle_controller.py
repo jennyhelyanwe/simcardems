@@ -214,14 +214,14 @@ def compute_target_pressure(
     elif state.phase == Phase.ISOVOL_CONTRACTION:
         if p.t_end_diastole > p.t_zero:
             dvol_aux = state.volume_n - state.end_dia_vol
-            gain_err = state.volume_n / max(state.pressure_n, 1e-12)
+            gain_err = state.volume_n / (max(state.pressure_n, 1e-12) * 1e7)
             pressure = (
                 state.pressure_n - gain_err * dvol_aux - p.gain_contraction[1] * ddvol
             )
             pressure = max(pressure, p.p_end_diastole)
         else:
             dvol_aux = state.volume_n - state.ini_vol
-            gain_err = state.volume_n / max(state.pressure_n, 1e-12)
+            gain_err = state.volume_n / (max(state.pressure_n, 1e-12) * 1e7)
             pressure = (
                 state.pressure_n - gain_err * dvol_aux - p.gain_contraction[1] * ddvol
             )
@@ -234,7 +234,7 @@ def compute_target_pressure(
         state.end_sys_vol = state.volume_n
 
     elif state.phase == Phase.ISOVOL_RELAXATION:
-        gain_err_r = state.pressure_n / max(state.volume_n, 1e-12)
+        gain_err_r = state.volume_n / (max(state.pressure_n, 1e-12) * 1e7)
         dvol_aux = state.volume_n - state.end_sys_vol
         pressure = (
             state.pressure_n - gain_err_r * dvol_aux - p.gain_relaxation[1] * ddvol
