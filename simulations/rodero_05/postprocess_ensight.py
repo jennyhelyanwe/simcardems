@@ -1,17 +1,17 @@
 """
 postprocess_ensight.py
-Convert simcardems results.h5 + extracted numpy data to EnSight Gold ASCII.
-EP fields nearest-neighbour interpolated onto mechanics mesh.
-Displacement written as vector per node on P1 mesh.
+Convert simcardems results.h5 to EnSight Gold ASCII.
+Runs inside Docker (needs dolfin for P1 mesh and displacement extraction).
 
 Usage:
-    python3 postprocess_ensight.py --results biv_coarse_run_output/results.h5 --p2 p2_data/ --out ensight/
+    python3 postprocess_ensight.py --results biv_coarse_run_output/results.h5 --out ensight/ --tv rodero_05_coarse_tv.npy
 """
 
 import argparse
 import os
 import numpy as np
 import h5py
+import dolfin
 from scipy.spatial import cKDTree
 
 
@@ -52,6 +52,27 @@ def load_field_h5py(h5file, group, field_name, time_str):
     return vals
 
 
+def extract_u_p1(h5file, mesh, time_str):
+    """Extract P2 displacement and interpolate to P1 corner nodes."""
+    V = dolfin.VectorFunctionSpace(mesh, 'Lagrange', 2)
+    u = dolfin.Function(V)
+    with dolfin.HDF5File(mesh.mpi_comm(), h5file, 'r') as f:
+        f.read(u, f'mechanics/u/{time_str}')
+
+    dm = V.dofmap()
+    p1_topo = mesh.cells()
+    n_p1_nodes = mesh.num_vertices()
+    p1_to_p2 = np.zeros(n_p1_nodes, dtype=int)
+    for cell in dolfin.cells(mesh):
+        p1_corners = p1_topo[cell.index()]
+        p2_dofs = dm.cell_dofs(cell.index())[::3] // 3
+        for j in range(4):
+            p1_to_p2[p1_corners[j]] = p2_dofs[j]
+
+    p2_vals = u.vector().get_local().reshape(-1, 3)
+    return p2_vals[p1_to_p2]
+
+
 def write_geo_file(path, coords, topo):
     with open(path, 'w') as f:
         f.write('EnSight Gold geometry file\n')
@@ -83,7 +104,6 @@ def write_scalar_file(path, vals, desc):
 
 
 def write_vector_node_file(path, vals, desc):
-    """vals shape: (n_nodes, 3) — vector per node."""
     with open(path, 'w') as f:
         f.write(f'{desc}\n')
         f.write('part\n')
@@ -114,14 +134,16 @@ def write_case_file(path, geo_file, scalar_vars, vector_vars, times_float):
             f.write(f'{t:12.5e}\n')
 
 
-def convert(h5file, p2dir, outdir):
+def convert(h5file, outdir, tv_file=None):
     os.makedirs(outdir, exist_ok=True)
 
-    print('Loading P1 mesh from numpy files...')
-    p1_coords = np.load(os.path.join(p2dir, 'p1_coords.npy'))
-    p1_topo = np.load(os.path.join(p2dir, 'p1_topo.npy'))
-    times_float = np.load(os.path.join(p2dir, 'timesteps.npy'))
-    print(f'  P1: {len(p1_coords)} nodes, {len(p1_topo)} cells, {len(times_float)} timesteps')
+    print('Loading mechanics mesh via dolfin...')
+    mesh = dolfin.Mesh()
+    with dolfin.HDF5File(mesh.mpi_comm(), h5file, 'r') as f:
+        f.read(mesh, 'geometry/mesh/mechanics', False)
+    p1_coords = mesh.coordinates()
+    p1_topo = mesh.cells()
+    print(f'  P1: {len(p1_coords)} nodes, {len(p1_topo)} cells')
 
     print('Loading EP mesh for interpolation...')
     ep_coords, ep_topo = load_mesh_h5py(h5file, 'ep')
@@ -139,7 +161,8 @@ def convert(h5file, p2dir, outdir):
     mech_time_strs = get_timesteps(h5file, 'mechanics')
     ep_time_strs = get_timesteps(h5file, 'ep')
     all_time_strs = sorted(set(mech_time_strs) | set(ep_time_strs), key=float)
-    print(f'  {len(all_time_strs)} timesteps')
+    times_float = [float(t) for t in all_time_strs]
+    print(f'  {len(times_float)} timesteps')
 
     with h5py.File(h5file, 'r') as f:
         mech_fields = [fn for fn in f['mechanics'].keys() if fn != 'u']
@@ -148,21 +171,20 @@ def convert(h5file, p2dir, outdir):
     scalar_vars = []
     vector_vars = []
 
-    # Displacement u — vector per node
+    # Displacement u — vector per node, extracted via dolfin P2->P1
     var_name = 'mech_u'
     pattern = f'{var_name}.****'
     print(f'Processing {var_name}...')
     for i, t_str in enumerate(all_time_strs):
         out_path = os.path.join(outdir, f'{var_name}.{i+1:04d}')
-        u_file = os.path.join(p2dir, f'u_{t_str}.npy')
-        if os.path.exists(u_file):
-            u_vals = np.load(u_file)
+        if t_str in mech_time_strs:
+            u_vals = extract_u_p1(h5file, mesh, t_str)
         else:
             u_vals = np.zeros((len(p1_coords), 3))
         write_vector_node_file(out_path, u_vals, var_name)
     vector_vars.append((var_name, pattern))
 
-    # Scalar mechanics fields — per element
+    # Scalar mechanics fields
     for field_name in mech_fields:
         var_name = f'mech_{field_name}'
         pattern = f'{var_name}.****'
@@ -176,7 +198,7 @@ def convert(h5file, p2dir, outdir):
             write_scalar_file(out_path, vals, var_name)
         scalar_vars.append((var_name, pattern))
 
-    # EP fields — per element, interpolated onto mechanics mesh
+    # EP fields
     for field_name in ep_fields:
         var_name = f'ep_{field_name}'
         pattern = f'{var_name}.****'
@@ -191,6 +213,17 @@ def convert(h5file, p2dir, outdir):
             write_scalar_file(out_path, vals, var_name)
         scalar_vars.append((var_name, pattern))
 
+    # Material labels
+    if tv_file and os.path.exists(tv_file):
+        coarse_tv = np.load(tv_file)
+        var_name = 'material_tv'
+        pattern = f'{var_name}.****'
+        print(f'Processing {var_name}...')
+        for i, t_str in enumerate(all_time_strs):
+            out_path = os.path.join(outdir, f'{var_name}.{i+1:04d}')
+            write_scalar_file(out_path, coarse_tv.astype(float), var_name)
+        scalar_vars.append((var_name, pattern))
+
     case_path = os.path.join(outdir, 'biv.case')
     write_case_file(case_path, geo_file, scalar_vars, vector_vars, times_float)
     print(f'Done. Open in ParaView: {case_path}')
@@ -199,7 +232,7 @@ def convert(h5file, p2dir, outdir):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--results', required=True)
-    parser.add_argument('--p2', required=True, help='Directory with extracted numpy files')
     parser.add_argument('--out', default='ensight')
+    parser.add_argument('--tv', default=None, help='Path to coarse_tv.npy material labels')
     args = parser.parse_args()
-    convert(args.results, args.p2, args.out)
+    convert(args.results, args.out, args.tv)
