@@ -3,11 +3,11 @@ cache_dir = os.environ.get("FENICS_CACHE_DIR", os.path.expanduser("~/.cache"))
 os.environ["XDG_CACHE_HOME"] = cache_dir
 
 import logging
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
 logging.getLogger("simcardems.newton_solver").setLevel(logging.DEBUG)
-logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.DEBUG)
+logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.WARNING)
 
 import dolfin
+dolfin.PETScOptions.set("mat_mumps_icntl_4", "0")
 import numpy as np
 import pandas as pd
 import pulse
@@ -98,7 +98,11 @@ class BiVCycleRunner(Runner):
 
     def _solve_mechanics(self):
         self.coupling.coupling_to_mechanics()
+        import time
+        t0 = time.time()
         self.coupling.solve_mechanics()
+        t1 = time.time()
+        mpi_print(f"  Mechanics solve time: {t1 - t0:.2f}s")
         self.coupling.update_prev_mechanics()
         self.coupling.mechanics_to_coupling()
         self.coupling.coupling_to_ep()
@@ -439,7 +443,6 @@ mpi_print(f"Residual before BC apply: {b.norm('l2'):.6e}")
 for bc in mech_problem._dirichlet_bc:
     bc.apply(b, x)
 mpi_print(f"Residual after BC apply: {b.norm('l2'):.6e}")
-dolfin.PETScOptions.set("mat_mumps_icntl_4", "3")
 dolfin.PETScOptions.set("mat_mumps_icntl_14", "500")
 lv_pressure_const.assign(0.0)
 rv_pressure_const.assign(0.0)

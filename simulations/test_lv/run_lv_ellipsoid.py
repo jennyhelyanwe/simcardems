@@ -31,8 +31,17 @@ logging.getLogger("matplotlib").setLevel(logging.WARNING)
 import dolfin
 dolfin.set_log_level(dolfin.LogLevel.DEBUG)
 # dolfin.PETScOptions.set("ksp_monitor_true_residual")
-dolfin.PETScOptions.set("ksp_type", "gmres")
-dolfin.PETScOptions.set("pc_type", "jacobi")
+# dolfin.PETScOptions.set("ksp_type", "gmres")
+# dolfin.PETScOptions.set("pc_type", "jacobi")
+
+# solver_parameters={
+#     "linear_solver": "mumps",
+#     "relative_tolerance": 1e-5,
+#     "absolute_tolerance": 1e-5,
+#     "maximum_iterations": 20,
+#     "report": True,
+#     "error_on_nonconvergence": False,
+# }
 # dolfin.PETScOptions.set("ksp_monitor_true_residual", "")
 # dolfin.PETScOptions.set("ksp_type", "preonly")
 # dolfin.PETScOptions.set("pc_type", "lu")
@@ -361,11 +370,11 @@ config.outdir         = "output_lv_ellipsoid"
 config.coupling_type  = "fully_coupled_Tor_Land"
 # config.coupling_type = "explicit_ORdmm_Land"
 config.save_freq      = 20
-# config.linear_mechanics_solver = "gmres"
+config.linear_mechanics_solver = "mumps"
 config.spring         = 10.0   # kPa/mm epicardial Robin
-config.debug_mode = False
+config.debug_mode = True
 config.mechanics_use_custom_newton_solver = False
-config.set_material = "Guccione"
+# config.set_material = "Guccione"
 # config.mechanics_use_custom_newton_solver = True
 # config.linear_mechanics_solver = "gmres"
 

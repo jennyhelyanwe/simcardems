@@ -63,16 +63,16 @@ def setup_solver(
     )
 
     active_model = ActiveModel(coupling=coupling, parameters=coupling.cell_params())
-    # material = pulse.HolzapfelOgden(
-    #     active_model=active_model,
-    #     parameters=material_parameters,
-    # )
-    print('Using Nearly Incompressible HO')
-    material = NearlyIncompressibleHO(
+    material = pulse.HolzapfelOgden(
         active_model=active_model,
         parameters=material_parameters,
-        kappa=1e3,
     )
+    # print('Using Nearly Incompressible HO')
+    # material = NearlyIncompressibleHO(
+    #     active_model=active_model,
+    #     parameters=material_parameters,
+    #     kappa=1e3,
+    # )
 
     if set_material == "Guccione":
         material_parameters = pulse.Guccione.default_parameters()
@@ -474,23 +474,12 @@ def create_problem(
         material,
         bcs,
         solver_parameters={
-            "petsc": {
-                "ksp_type": "gmres",
-                "pc_type": "bjacobi",
-                "sub_pc_type": "ilu",
-                "ksp_max_it": 1000,
-                "ksp_rtol": 1e-5,
-                "ksp_gmres_restart": 100,
-            },
-            "linear_solver": "gmres",
-            "preconditioner": "bjacobi",
-            "verbose": verbose,
-            "debug": debug_mode,
-            "error_on_nonconvergence": False,
+            "linear_solver": "mumps",
             "relative_tolerance": 1e-5,
             "absolute_tolerance": 1e-5,
             "maximum_iterations": 20,
             "report": True,
+            "error_on_nonconvergence": False,
         },
         use_custom_newton_solver=use_custom_newton_solver,
     )

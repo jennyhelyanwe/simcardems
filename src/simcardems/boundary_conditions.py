@@ -138,7 +138,7 @@ def create_biv_boundary_conditions(
 ):
     import dolfin as _d
     if _d.MPI.rank(_d.MPI.comm_world) == 0:
-        print("[BC] BASE fixed, EPI free, no pressure", flush=True)
+        print("[BC] BASE free, EPI spring, no pressure", flush=True)
 
     neumann_bc = []
     # if traction_lv is not None:
