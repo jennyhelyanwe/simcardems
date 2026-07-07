@@ -13,6 +13,12 @@ Edit -> Remesh
 
 Target Edge Length -> 0.2 (the mesh is actually in cm, so 0.2 gives you 2 mm in reality).
 
+Regularity: 100 (make sure triangles are equilateral as much as possible)
+Threshold: 50
+Iterations: 15
+Boundary Mode: Free Boundary
+
+
 View -> Show Wireframe (to visually check quality).
 
 Accept
@@ -57,12 +63,34 @@ print(f"  Hole points: {hole1}, {hole2}")
 tet = tetgen.TetGen(surf)
 tet.add_hole(hole1)
 tet.add_hole(hole2)
-tet.tetrahedralize(switches="pq1.414/20")
+# tet.tetrahedralize(switches="pq1.414/20")
+tet.tetrahedralize(switches="pq1.2/15a50")
 
 coarse_pv = tet.grid
 coarse_pv.points *= 10  # scale to mm
-coarse_pv.save("rodero_05_coarse.vtu")
+coarse_pv.save("rodero_05_coarse_"+resolution+".vtu")
 print(f"  TetGen mesh: {coarse_pv.n_points} nodes, {coarse_pv.n_cells} cells")
+
+## MMG3D mesh optimisation and quality check
+import subprocess
+import meshio
+
+# Convert TetGen VTU to .mesh for mmg3d
+meshio.write("rodero_05_coarse_tmp.mesh", meshio.read("rodero_05_coarse_"+resolution+".vtu"))
+
+# Run mmg3d optimisation
+subprocess.run([
+    "mmg3d_O3",
+    "-in", "rodero_05_coarse_tmp.mesh",
+    "-out", "rodero_05_coarse_opt.mesh",
+    "-hmax", "2.0", "-hmin", "1.8", "-hgrad", "1.3", "-hausd", "0.5",
+    "-optim"
+], check=True)
+
+# Read back optimised mesh
+m_opt = meshio.read("rodero_05_coarse_opt.mesh")
+coarse_pv = pv.wrap(m_opt)  # continue pipeline with optimised mesh
+coarse_pv.save("rodero_05_coarse_"+resolution+".vtu")
 
 # ── Step 3: Nearest-neighbour marker transfer from fine mesh ──────────────────
 
@@ -103,7 +131,7 @@ tree_coarse = cKDTree(coarse_face_centres)
 
 print("Step 4: Building dolfin mesh and assigning boundary markers...")
 
-m = meshio.read("rodero_05_coarse.vtu")
+m = meshio.read("rodero_05_coarse_"+resolution+".vtu")
 coords = m.points
 cells = m.cells_dict["tetra"]
 
@@ -256,6 +284,27 @@ else:
     print("  All fibre norms OK.")
 
 print(f"Final mesh: {dolfin_mesh.num_cells()} cells, {dolfin_mesh.num_vertices()} vertices")
+
+import dolfin
+import numpy as np
+
+mesh = dolfin.Mesh()
+with dolfin.HDF5File(mesh.mpi_comm(), "rodero_05_coarse_2mm.h5", "r") as f:
+    f.read(mesh, "mesh", False)
+
+volumes = np.array([cell.volume() for cell in dolfin.cells(mesh)])
+print(f"Cell volumes: min={volumes.min():.4f}, mean={volumes.mean():.4f}, max={volumes.max():.4f}")
+print(f"Negative volumes: {np.sum(volumes < 0)}")
+print(f"Very small volumes (<0.01): {np.sum(volumes < 0.01)}")
+
+# Check inradius/circumradius ratio (quality metric)
+radii = np.array([cell.inradius() / cell.circumradius() for cell in dolfin.cells(mesh)])
+print(f"Inradius/circumradius: min={radii.min():.4f}, mean={radii.mean():.4f}")
+print(f"Poor quality (ratio < 0.1): {np.sum(radii < 0.1)}")
+
+import meshio
+m = meshio.read("rodero_05_coarse_"+resolution+".vtu")
+meshio.write(f"rodero_05_coarse_"+resolution+"_pre_mmg.mesh", m)
 
 # ── Step 8: Export XDMF for visualisation ────────────────────────────────────
 
