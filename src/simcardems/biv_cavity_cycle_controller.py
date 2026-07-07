@@ -124,6 +124,7 @@ class CavityState:
 
     pressure_n: float = 0.0
     prestress_n: float = 0.0
+    pressure_n_minus_1: float = 0.0
 
     wdk_pressure_n: float = 0.0
 
@@ -212,20 +213,17 @@ def compute_target_pressure(
         state.end_dia_vol = state.volume_n
 
     elif state.phase == Phase.ISOVOL_CONTRACTION:
-        if p.t_end_diastole > p.t_zero:
-            dvol_aux = state.volume_n - state.end_dia_vol
-            gain_err = state.volume_n / (max(state.pressure_n, 1e-12) * 1e7)
-            pressure = (
-                state.pressure_n - gain_err * dvol_aux - p.gain_contraction[1] * ddvol
-            )
-            pressure = max(pressure, p.p_end_diastole)
+        dvol_aux = state.volume_n - state.end_dia_vol
+        ddvol = dvol / dt
+        # Estimate dP/dV from simulation history
+        dV = state.volume_n - state.volume_n_minus_1
+        dP = state.pressure_n - state.pressure_n_minus_1
+        if abs(dV) > 1.0 and abs(dP) > 1e-6:
+            gain_err = abs(dP) / abs(dV)  # kPa/mm³
         else:
-            dvol_aux = state.volume_n - state.ini_vol
-            gain_err = state.volume_n / (max(state.pressure_n, 1e-12) * 1e7)
-            pressure = (
-                state.pressure_n - gain_err * dvol_aux - p.gain_contraction[1] * ddvol
-            )
-            pressure = max(pressure, state.pressure_n)
+            gain_err = state.pressure_n / max(state.volume_n, 1e-12)
+        pressure = state.pressure_n - gain_err * dvol_aux - p.gain_contraction[1] * ddvol
+        pressure = max(pressure, p.p_end_diastole)
         if state.volume_n_minus_1 > state.end_dia_vol:
             state.end_dia_vol = state.volume_n_minus_1
 
@@ -233,12 +231,17 @@ def compute_target_pressure(
         pressure = wdk_pres
         state.end_sys_vol = state.volume_n
 
+
     elif state.phase == Phase.ISOVOL_RELAXATION:
-        gain_err_r = state.volume_n / (max(state.pressure_n, 1e-12) * 1e7)
         dvol_aux = state.volume_n - state.end_sys_vol
-        pressure = (
-            state.pressure_n - gain_err_r * dvol_aux - p.gain_relaxation[1] * ddvol
-        )
+        ddvol = dvol / dt
+        dV = state.volume_n - state.volume_n_minus_1
+        dP = state.pressure_n - state.pressure_n_minus_1
+        if abs(dV) > 1.0 and abs(dP) > 1e-6:
+            gain_err_r = abs(dP) / abs(dV)
+        else:
+            gain_err_r = state.pressure_n / max(state.volume_n, 1e-12)
+        pressure = state.pressure_n - gain_err_r * dvol_aux - p.gain_relaxation[1] * ddvol
         pressure = min(pressure, state.pressure_n)
 
     elif state.phase == Phase.FILLING:
@@ -252,8 +255,8 @@ def compute_target_pressure(
             if state.volume_n > state.end_preload_vol:
                 pressure = state.pressure_n - p.gain_relaxation[0] * dvol_aux
         else:
-            fill_rate = (p.preload_pressure - p.p_fill) / (
-                state.ini_vol - state.end_sys_vol
+            fill_rate = (p.preload_pressure - p.p_fill) / max(
+                abs(state.ini_vol - state.end_sys_vol), 1e-6
             )
             fill_rate = max(fill_rate, -500.0)
             pressure = state.pressure_n + fill_rate * dvol
@@ -316,6 +319,7 @@ def commit_step(state: CavityState, new_volume: float, new_pressure: float):
     """End-of-macro-step bookkeeping, mirroring ITASK_ENDITE."""
     state.dvol_n = new_volume - state.volume_n
     state.volume_n_minus_1 = state.volume_n
+    state.pressure_n_minus_1 = state.pressure_n
     state.volume_n = new_volume
     state.pressure_n = new_pressure
 
@@ -380,18 +384,59 @@ class BiVCycleController:
         else:
             # self.lv_pressure_constant.assign(0.0)
             # self.rv_pressure_constant.assign(0.0)
-            pulse.iterate.iterate(
-                problem,
-                control=(self.lv_pressure_constant, self.rv_pressure_constant),
-                target=(target_lv, target_rv),
-            )
+            try:
+                lv_unchanged = abs(target_lv - float(self.lv_pressure_constant)) < 1e-10
+                rv_unchanged = abs(target_rv - float(self.rv_pressure_constant)) < 1e-10
 
-        u_new, _ = problem.state.split(deepcopy=True)
-        v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker)
-        v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker)
+                if lv_unchanged and rv_unchanged:
+                    print('Both LVP and RVP are unchanged')
+                    problem.solve()
+                elif lv_unchanged:
+                    print('LVP is unchanged.')
+                    self.lv_pressure_constant.assign(target_lv)
+                    pulse.iterate.iterate(
+                        problem,
+                        control=self.rv_pressure_constant,
+                        target=target_rv,
+                    )
+                elif rv_unchanged:
+                    print('RVP is unchanged.')
+                    self.rv_pressure_constant.assign(target_rv)
+                    pulse.iterate.iterate(
+                        problem,
+                        control=self.lv_pressure_constant,
+                        target=target_lv,
+                    )
+                else:
+                    pulse.iterate.iterate(
+                        problem,
+                        control=(self.lv_pressure_constant, self.rv_pressure_constant),
+                        target=(target_lv, target_rv),
+                    )
+            except ZeroDivisionError:
+                import traceback
+                traceback.print_exc()
+                raise
 
-        commit_step(self.lv_state, v_lv_new, target_lv)
-        commit_step(self.rv_state, v_rv_new, target_rv)
+        # u_new, _ = problem.state.split(deepcopy=True)
+        # v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker)
+        # v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker)
+        #
+        # commit_step(self.lv_state, v_lv_new, target_lv)
+        # commit_step(self.rv_state, v_rv_new, target_rv)
+        #
+        # advance_phase(self.lv_state, t, dt)
+        # advance_phase(self.rv_state, t, dt)
 
-        advance_phase(self.lv_state, t, dt)
-        advance_phase(self.rv_state, t, dt)
+        try:
+            u_new, _ = problem.state.split(deepcopy=True)
+            v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker)
+            v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker)
+            commit_step(self.lv_state, v_lv_new, target_lv)
+            commit_step(self.rv_state, v_rv_new, target_rv)
+            advance_phase(self.lv_state, t, dt)
+            advance_phase(self.rv_state, t, dt)
+        except ZeroDivisionError as e:
+            import traceback
+            traceback.print_exc()
+            raise
