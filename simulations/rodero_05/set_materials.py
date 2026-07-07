@@ -19,7 +19,7 @@ print(f'Unique material labels: {np.unique(tv)}')
 
 # Load coarse mesh centroids from h5
 import h5py
-with h5py.File('./rodero_05_coarse_4mm.h5', 'r') as f:
+with h5py.File('./rodero_05_coarse_2mm.h5', 'r') as f:
     coords = f['mesh/coordinates'][:]
     topo = f['mesh/topology'][:]
 
@@ -34,5 +34,5 @@ coarse_tv = tv[idx]
 print(f'Coarse material labels: {np.unique(coarse_tv)}')
 print(f'Valve plug elements (7-10): {np.sum(coarse_tv >= 7)}')
 
-np.save('./rodero_05_coarse_tv.npy', coarse_tv)
-print('Saved rodero_05_coarse_tv.npy')
+np.save('./rodero_05_coarse_2mm_tv.npy', coarse_tv)
+print('Saved rodero_05_coarse_2mm_tv.npy')

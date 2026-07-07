@@ -197,7 +197,7 @@ from simcardems.geometry import refine_mesh
 geo = Geometry.from_file("rodero_05_coarse_"+RESOLUTION+".h5")
 
 # Build refined EP mesh with parent tracking
-ep_mesh = refine_mesh(geo.mesh, num_refinements=3)
+ep_mesh = refine_mesh(geo.mesh, num_refinements=2)
 ffun_ep = dolfin.adapt(geo.ffun, ep_mesh)
 
 biv_geo = BiVentricularGeometry.from_geometry(
@@ -213,7 +213,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 # Load valve plug mask
-coarse_tv = np.load('./rodero_05_coarse_tv.npy')
+coarse_tv = np.load('./rodero_05_coarse_'+RESOLUTION+'_tv.npy')
 is_valve = (coarse_tv >= 7).astype(float)  # 1.0 for valve, 0.0 for myocardium
 
 # Create DG0 function for valve mask

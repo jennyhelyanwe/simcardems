@@ -41,7 +41,7 @@ from scipy.spatial import cKDTree
 
 print("Step 2: Tetrahedralising with TetGen...")
 
-resolution = '3mm'
+resolution = '2mm'
 surf = pv.read("rodero_05_"+resolution+".obj")
 bodies = surf.split_bodies()
 bodies_sorted = sorted(bodies, key=lambda b: b.area, reverse=True)
