@@ -1,12 +1,29 @@
 """
 Coarse mesh generation pipeline for rodero_05.
-Part 1 (not included): Meshmixer remeshing of rodero_05 surface to 4mm -> rodero_05_4_mm.obj
+Part 1 (not included): Meshmixer remeshing of rodero_05 surface to 4mm -> rodero_05_4mm.obj
+
+Meshmixer instructions:
+Load in fine surface mesh extract from rodero_05 using paraview Extract Surface filter, as rodero_05_fine.obj
+
+Analysis -> Inspector -> Auto Repair All
+
+Ctrl A to select entire mesh
+
+Edit -> Remesh
+
+Target Edge Length -> 0.2 (the mesh is actually in cm, so 0.2 gives you 2 mm in reality).
+
+View -> Show Wireframe (to visually check quality).
+
+Accept
+
+Export rodero_05_2_mm.obj
 
 Steps 2-8:
     2. TetGen tetrahedralise with cavity holes, scale to mm
     3. Extract surface, nearest-neighbour marker transfer from fine mesh boundary facets
     4. Build dolfin mesh from VTU, assign ffun from markers
-    5. Save to rodero_05_coarse_4mm.h5 with mesh, ffun, marker metadata
+    5. Save to rodero_05_coarse_2mm.h5 with mesh, ffun, marker metadata
     6. KD-tree fibre interpolation from fine mesh
     7. Save fibres to h5
     8. Export XDMF for visualisation
@@ -24,7 +41,8 @@ from scipy.spatial import cKDTree
 
 print("Step 2: Tetrahedralising with TetGen...")
 
-surf = pv.read("rodero_05_4_mm.obj")
+resolution = '3mm'
+surf = pv.read("rodero_05_"+resolution+".obj")
 bodies = surf.split_bodies()
 bodies_sorted = sorted(bodies, key=lambda b: b.area, reverse=True)
 epi, endo1, endo2 = bodies_sorted
@@ -114,13 +132,13 @@ print(f"  Mesh: {dolfin_mesh.num_vertices()} vertices, {dolfin_mesh.num_cells()}
 
 # ── Step 5: Save mesh and ffun to h5 ─────────────────────────────────────────
 
-print("Step 5: Saving mesh to rodero_05_coarse_4mm.h5...")
+print("Step 5: Saving mesh to rodero_05_coarse_"+resolution+".h5...")
 
-with dolfin.HDF5File(dolfin_mesh.mpi_comm(), "rodero_05_coarse_4mm.h5", "w") as f:
+with dolfin.HDF5File(dolfin_mesh.mpi_comm(), "rodero_05_coarse_"+resolution+".h5", "w") as f:
     f.write(dolfin_mesh, "mesh")
     f.write(ffun, "meshfunctions/ffun")
 
-with h5py.File("rodero_05_coarse_4mm.h5", "a") as f:
+with h5py.File("rodero_05_coarse_"+resolution+".h5", "a") as f:
     f.create_dataset("info/mesh_type", data="biv_ellipsoid")
     f.create_dataset("info/num_refinements", data=0)
     f.create_dataset("markers/BASE",    data=[10, 2])
@@ -192,7 +210,7 @@ for func in [f0_coarse, s0_coarse, n0_coarse]:
 
 print("Step 7: Saving fibres to h5...")
 
-with dolfin.HDF5File(dolfin_mesh.mpi_comm(), "rodero_05_coarse_4mm.h5", "a") as f:
+with dolfin.HDF5File(dolfin_mesh.mpi_comm(), "rodero_05_coarse_"+resolution+".h5", "a") as f:
     f.write(f0_coarse, "microstructure/f0")
     f.write(s0_coarse, "microstructure/s0")
     f.write(n0_coarse, "microstructure/n0")
@@ -202,7 +220,7 @@ print("  Fibres saved.")
 # ── Quality check: fibre orthonormality ──────────────────────────────────────
 print("Quality checking fibres...")
 
-with dolfin.HDF5File(dolfin_mesh.mpi_comm(), "rodero_05_coarse_4mm.h5", "r") as f:
+with dolfin.HDF5File(dolfin_mesh.mpi_comm(), "rodero_05_coarse_"+resolution+".h5", "r") as f:
     f0_check = dolfin.Function(dolfin.VectorFunctionSpace(dolfin_mesh, "DG", 0))
     s0_check = dolfin.Function(dolfin.VectorFunctionSpace(dolfin_mesh, "DG", 0))
     n0_check = dolfin.Function(dolfin.VectorFunctionSpace(dolfin_mesh, "DG", 0))
@@ -243,10 +261,10 @@ print(f"Final mesh: {dolfin_mesh.num_cells()} cells, {dolfin_mesh.num_vertices()
 
 print("Step 8: Exporting XDMF...")
 
-with dolfin.XDMFFile("rodero_05_coarse_mesh_4mm.xdmf") as xf:
+with dolfin.XDMFFile("rodero_05_coarse_mesh_"+resolution+".xdmf") as xf:
     xf.write(dolfin_mesh)
 
-with dolfin.XDMFFile("rodero_05_coarse_boundaries_4mm.xdmf") as xf:
+with dolfin.XDMFFile("rodero_05_coarse_boundaries_"+resolution+".xdmf") as xf:
     xf.write(ffun)
 
-print("Done. Output: rodero_05_coarse_4mm.h5, rodero_05_coarse_mesh_4mm.xdmf, rodero_05_coarse_boundaries_4mm.xdmf")
+print("Done. Output: rodero_05_coarse_"+resolution+".h5, rodero_05_coarse_mesh_"+resolution+".xdmf, rodero_05_coarse_boundaries_"+resolution+".xdmf")

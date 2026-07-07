@@ -38,6 +38,8 @@ def mpi_print(*args, **kwargs):
     if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
         print(*args, **kwargs, flush=True)
 
+RESOLUTION = "2mm"
+
 # ── Warm start configuration ──────────────────────────────────────────────────
 WARM_START_T_MS = None  # Set to e.g. 100.0 to restart from t=100ms, or None for fresh start
 
@@ -192,7 +194,7 @@ from cardiac_geometries.geometry import Geometry
 from simcardems.bivgeometry import BiVentricularGeometry
 from simcardems.geometry import refine_mesh
 
-geo = Geometry.from_file("rodero_05_coarse_4mm.h5")
+geo = Geometry.from_file("rodero_05_coarse_"+RESOLUTION+".h5")
 
 # Build refined EP mesh with parent tracking
 ep_mesh = refine_mesh(geo.mesh, num_refinements=3)
@@ -202,7 +204,7 @@ biv_geo = BiVentricularGeometry.from_geometry(
     geo,
     ep_mesh=ep_mesh,
     ffun_ep=ffun_ep,
-    parameters={"num_refinements": 3},
+    parameters={"num_refinements": 2},
 )
 mpi_print(f"EP Mesh vertices: {biv_geo.ep_mesh.num_vertices()}")
 mpi_print(f"Mechanics Mesh vertices: {biv_geo.mechanics_mesh.num_vertices()}")
@@ -272,7 +274,7 @@ config = Config()
 config.T                                  = 800.0
 config.dt                                 = 1.0
 config.dt_mech                            = 5.0
-config.geometry_path                      = "rodero_05_coarse_4mm.h5"
+config.geometry_path                      = "rodero_05_coarse_"+RESOLUTION+".h5"
 config.outdir                             = "biv_coarse_run_output"
 config.coupling_type                      = "fully_coupled_Tor_Land"
 config.save_freq                          = 20
