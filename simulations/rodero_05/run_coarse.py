@@ -39,7 +39,7 @@ def mpi_print(*args, **kwargs):
         print(*args, **kwargs, flush=True)
 
 # ── Warm start configuration ──────────────────────────────────────────────────
-WARM_START_T_MS = 102  # Set to e.g. 100.0 to restart from t=100ms, or None for fresh start
+WARM_START_T_MS = None  # Set to e.g. 100.0 to restart from t=100ms, or None for fresh start
 
 # ── PseudoECG ──────────────────────────────────────────────────────────────────
 
