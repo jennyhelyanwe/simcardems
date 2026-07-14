@@ -114,6 +114,10 @@ for facet in dolfin.facets(fine_mesh):
 
 fine_boundary_centroids = np.array(fine_boundary_centroids)
 fine_boundary_markers = np.array(fine_boundary_markers)
+
+coords = fine_mesh.coordinates()
+cells_arr = fine_mesh.cells()
+fine_cell_centres = coords[cells_arr].mean(axis=1)
 print(f"  Fine marker counts: { {m: np.sum(fine_boundary_markers==m) for m in np.unique(fine_boundary_markers)} }")
 
 tree_fine = cKDTree(fine_boundary_centroids)
@@ -196,45 +200,105 @@ v2d = dolfin.vertex_to_dof_map(VFS_fine_p1)
 fine_topo = fine_mesh.cells()  # (n_cells, 4)
 n_fine_vertices = fine_mesh.num_vertices()
 
-def p1_to_cell_centres(fn):
-    """Average P1 nodal values over the 4 corner nodes of each tet."""
+# def p1_to_cell_centres(fn):
+#     """Average P1 nodal values over the 4 corner nodes of each tet."""
+#     raw = fn.vector().get_local()
+#     nodes = np.zeros((n_fine_vertices, 3))
+#     for i in range(n_fine_vertices):
+#         nodes[i] = raw[v2d[3*i:3*i+3]]
+#     return nodes[fine_topo].mean(axis=1)  # (n_cells, 3)
+
+def p1_to_cell_centres_nearest(fn, fine_mesh, fine_topo, v2d, n_fine_vertices):
+    """Assign each fine cell the fiber value at its nearest vertex (no averaging)."""
     raw = fn.vector().get_local()
     nodes = np.zeros((n_fine_vertices, 3))
     for i in range(n_fine_vertices):
         nodes[i] = raw[v2d[3*i:3*i+3]]
-    return nodes[fine_topo].mean(axis=1)  # (n_cells, 3)
 
-f0_vals = p1_to_cell_centres(f0_fine)
-s0_vals = p1_to_cell_centres(s0_fine)
-n0_vals = p1_to_cell_centres(n0_fine)
+    vertex_coords = fine_mesh.coordinates()
+    cell_centres = vertex_coords[fine_topo].mean(axis=1)  # still fine to average *positions*
+    # pick the vertex among the cell's 4 corners closest to the cell centroid
+    corner_coords = vertex_coords[fine_topo]  # (n_cells, 4, 3)
+    dists = np.linalg.norm(corner_coords - cell_centres[:, None, :], axis=2)
+    nearest_local = np.argmin(dists, axis=1)  # (n_cells,) index into 0..3
+    nearest_global = fine_topo[np.arange(len(fine_topo)), nearest_local]
+    return nodes[nearest_global]
+
+f0_vals = p1_to_cell_centres_nearest(f0_fine, fine_mesh, fine_topo, v2d, n_fine_vertices)
+s0_vals = p1_to_cell_centres_nearest(s0_fine, fine_mesh, fine_topo, v2d, n_fine_vertices)
+n0_vals = p1_to_cell_centres_nearest(n0_fine, fine_mesh, fine_topo, v2d, n_fine_vertices)
 
 print(f"  Fine mesh zero f0: {np.sum(np.linalg.norm(f0_vals, axis=1) < 1e-10)} / {len(f0_vals)}")
 
 # Build KD-tree from fine cell centres and query with coarse cell centres
-fine_cell_centres = np.array([cell.midpoint().array() for cell in dolfin.cells(fine_mesh)])
+coords = fine_mesh.coordinates()
+cells_arr = fine_mesh.cells()
+fine_cell_centres = coords[cells_arr].mean(axis=1)
 tree_fine = cKDTree(fine_cell_centres)
-coarse_cell_centres = np.array([cell.midpoint().array() for cell in dolfin.cells(dolfin_mesh)])
+
+coords = dolfin_mesh.coordinates()
+cells_arr = dolfin_mesh.cells()
+coarse_cell_centres = coords[cells_arr].mean(axis=1)
+# coarse_cell_centres = np.array([cell.midpoint().array() for cell in dolfin.cells(dolfin_mesh)])
 _, idx = tree_fine.query(coarse_cell_centres)
 
 print(f"  Fine cell centres range: {fine_cell_centres.min():.3f} to {fine_cell_centres.max():.3f}")
 print(f"  Coarse cell centres range: {coarse_cell_centres.min():.3f} to {coarse_cell_centres.max():.3f}")
 
 # Assign to coarse DG0 functions
+# Assign to coarse DG0 functions
 VFS_coarse = dolfin.VectorFunctionSpace(dolfin_mesh, "DG", 0)
 f0_coarse = dolfin.Function(VFS_coarse)
 s0_coarse = dolfin.Function(VFS_coarse)
 n0_coarse = dolfin.Function(VFS_coarse)
 
-f0_coarse.vector().set_local(f0_vals[idx].flatten())
-s0_coarse.vector().set_local(s0_vals[idx].flatten())
-n0_coarse.vector().set_local(n0_vals[idx].flatten())
+f0_raw = f0_vals[idx]
+s0_raw = s0_vals[idx]
+n0_raw = n0_vals[idx]
 
-# Normalise
-for func in [f0_coarse, s0_coarse, n0_coarse]:
-    arr = func.vector().get_local().reshape(-1, 3)
-    norms = np.linalg.norm(arr, axis=1, keepdims=True)
-    arr = np.where(norms > 1e-10, arr / norms, arr)
-    func.vector().set_local(arr.flatten())
+print("Before Gram-Schmidt:")
+dot_fs = np.abs(np.sum(f0_raw * s0_raw, axis=1))
+dot_fn = np.abs(np.sum(f0_raw * n0_raw, axis=1))
+dot_sn = np.abs(np.sum(s0_raw * n0_raw, axis=1))
+print(f"  max|f0.s0|={dot_fs.max():.3e}, max|f0.n0|={dot_fn.max():.3e}, max|s0.n0|={dot_sn.max():.3e}")
+
+def gram_schmidt_orthonormalize(f0_arr, s0_arr, n0_arr):
+    """
+    Gram-Schmidt orthonormalization of (f0, s0, n0) triads, row-wise.
+    f0 is treated as the anchor (kept as-is, just renormalized).
+    s0 is orthogonalized against f0, then renormalized.
+    n0 is set to f0 x s0 (guarantees exact orthogonality to both), renormalized.
+    """
+    # Step 1: normalize f0
+    f0_norm = np.linalg.norm(f0_arr, axis=1, keepdims=True)
+    f0_new = f0_arr / np.where(f0_norm > 1e-10, f0_norm, 1.0)
+
+    # Step 2: orthogonalize s0 against f0, then normalize
+    proj = np.einsum('ij,ij->i', s0_arr, f0_new)[:, None] * f0_new
+    s0_orth = s0_arr - proj
+    s0_norm = np.linalg.norm(s0_orth, axis=1, keepdims=True)
+    degenerate_s0 = (s0_norm < 1e-8).flatten()
+    if degenerate_s0.sum() > 0:
+        print(f"  WARNING: {degenerate_s0.sum()} dofs have s0 nearly parallel to f0 after orthogonalization!")
+    s0_new = s0_orth / np.where(s0_norm > 1e-10, s0_norm, 1.0)
+
+    # Step 3: n0 = f0 x s0 (guarantees exact orthogonality to both by construction)
+    n0_new = np.cross(f0_new, s0_new)
+    n0_norm = np.linalg.norm(n0_new, axis=1, keepdims=True)
+    n0_new = n0_new / np.where(n0_norm > 1e-10, n0_norm, 1.0)
+
+    return f0_new, s0_new, n0_new
+f0_gs, s0_gs, n0_gs = gram_schmidt_orthonormalize(f0_raw, s0_raw, n0_raw)
+
+print("After Gram-Schmidt:")
+dot_fs = np.abs(np.sum(f0_gs * s0_gs, axis=1))
+dot_fn = np.abs(np.sum(f0_gs * n0_gs, axis=1))
+dot_sn = np.abs(np.sum(s0_gs * n0_gs, axis=1))
+print(f"  max|f0.s0|={dot_fs.max():.3e}, max|f0.n0|={dot_fn.max():.3e}, max|s0.n0|={dot_sn.max():.3e}")
+
+f0_coarse.vector().set_local(f0_gs.flatten())
+s0_coarse.vector().set_local(s0_gs.flatten())
+n0_coarse.vector().set_local(n0_gs.flatten())
 
 print("Step 7: Saving fibres to h5...")
 
@@ -291,14 +355,65 @@ import numpy as np
 mesh = dolfin.Mesh()
 with dolfin.HDF5File(mesh.mpi_comm(), "rodero_05_coarse_2mm.h5", "r") as f:
     f.read(mesh, "mesh", False)
+coords = mesh.coordinates()
+cells_arr = mesh.cells()
 
-volumes = np.array([cell.volume() for cell in dolfin.cells(mesh)])
+def tet_volumes(coords, cells_arr):
+    p0 = coords[cells_arr[:, 0]]
+    p1 = coords[cells_arr[:, 1]]
+    p2 = coords[cells_arr[:, 2]]
+    p3 = coords[cells_arr[:, 3]]
+    return np.abs(np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0))) / 6.0
+
+volumes = tet_volumes(coords, cells_arr)
 print(f"Cell volumes: min={volumes.min():.4f}, mean={volumes.mean():.4f}, max={volumes.max():.4f}")
 print(f"Negative volumes: {np.sum(volumes < 0)}")
 print(f"Very small volumes (<0.01): {np.sum(volumes < 0.01)}")
 
 # Check inradius/circumradius ratio (quality metric)
-radii = np.array([cell.inradius() / cell.circumradius() for cell in dolfin.cells(mesh)])
+def tet_quality_ratios(coords, cells_arr):
+    """Vectorized inradius/circumradius ratio for tetrahedra."""
+    p0 = coords[cells_arr[:, 0]]
+    p1 = coords[cells_arr[:, 1]]
+    p2 = coords[cells_arr[:, 2]]
+    p3 = coords[cells_arr[:, 3]]
+
+    # Volume (already have from tet_volumes, but recompute signed for clarity)
+    vol = np.abs(np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0))) / 6.0
+
+    # Face areas (4 faces per tet): use 0.5*|cross product| for each triangular face
+    def tri_area(a, b, c):
+        return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+
+    A0 = tri_area(p1, p2, p3)  # face opposite p0
+    A1 = tri_area(p0, p2, p3)  # face opposite p1
+    A2 = tri_area(p0, p1, p3)  # face opposite p2
+    A3 = tri_area(p0, p1, p2)  # face opposite p3
+    surface_area = A0 + A1 + A2 + A3
+
+    inradius = 3 * vol / surface_area
+
+    # Circumradius via edge lengths (Cayley-Menger-free approach using edge vectors)
+    edges = [p1 - p0, p2 - p0, p3 - p0]
+    a = np.linalg.norm(p1 - p0, axis=1)
+    b = np.linalg.norm(p2 - p0, axis=1)
+    c = np.linalg.norm(p3 - p0, axis=1)
+    a1 = np.linalg.norm(p3 - p2, axis=1)
+    b1 = np.linalg.norm(p3 - p1, axis=1)
+    c1 = np.linalg.norm(p2 - p1, axis=1)
+
+    # Circumradius formula for a tetrahedron
+    num = np.sqrt(
+        (a*a1 + b*b1 + c*c1) *
+        (a*a1 + b*b1 - c*c1) *
+        (a*a1 - b*b1 + c*c1) *
+        (-a*a1 + b*b1 + c*c1)
+    )
+    circumradius = num / (24 * vol)
+
+    return inradius / circumradius
+
+radii = tet_quality_ratios(coords, cells_arr)
 print(f"Inradius/circumradius: min={radii.min():.4f}, mean={radii.mean():.4f}")
 print(f"Poor quality (ratio < 0.1): {np.sum(radii < 0.1)}")
 
@@ -306,8 +421,94 @@ import meshio
 m = meshio.read("rodero_05_coarse_"+resolution+".vtu")
 meshio.write(f"rodero_05_coarse_"+resolution+"_pre_mmg.mesh", m)
 
-# ── Step 8: Export XDMF for visualisation ────────────────────────────────────
+# ── Step 7b: Export fibre fields to VTU (fine mesh, point data) ─────────────
+print("Step 7b: Exporting fine mesh fibres to VTU...")
 
+def export_fine_fibres_vtu(fine_mesh, f0_fine, s0_fine, n0_fine, v2d, n_fine_vertices,
+                            out_path="rodero_05_fine_fibres.vtu"):
+    coords = fine_mesh.coordinates()
+    cells = fine_mesh.cells()
+    vtk_cells = np.hstack([np.full((cells.shape[0], 1), 4), cells]).flatten()
+    grid = pv.UnstructuredGrid(vtk_cells, np.full(cells.shape[0], pv.CellType.TETRA), coords)
+
+    def get_point_array(fn):
+        raw = fn.vector().get_local()
+        nodes = np.zeros((n_fine_vertices, 3))
+        for i in range(n_fine_vertices):
+            nodes[i] = raw[v2d[3*i:3*i+3]]
+        return nodes
+
+    f0_pts = get_point_array(f0_fine)
+    s0_pts = get_point_array(s0_fine)
+    n0_pts = get_point_array(n0_fine)
+
+    grid.point_data["f0"] = f0_pts
+    grid.point_data["s0"] = s0_pts
+    grid.point_data["n0"] = n0_pts
+    grid.point_data["f0_dot_s0"] = np.abs(np.sum(f0_pts * s0_pts, axis=1))
+    grid.point_data["f0_dot_n0"] = np.abs(np.sum(f0_pts * n0_pts, axis=1))
+    grid.point_data["s0_dot_n0"] = np.abs(np.sum(s0_pts * n0_pts, axis=1))
+
+    grid.save(out_path)
+    print(f"  Saved {out_path}")
+
+export_fine_fibres_vtu(fine_mesh, f0_fine, s0_fine, n0_fine, v2d, n_fine_vertices,
+                        out_path="rodero_05_fine_fibres.vtu")
+
+# ── Step 7c: Export fibre fields to VTU (coarse mesh, cell data) ────────────
+print("Step 7c: Exporting coarse mesh fibres to VTU...")
+
+def export_coarse_fibres_vtu(dolfin_mesh, f0_func, s0_func, n0_func,
+                              out_path="rodero_05_coarse_"+resolution+"_fibres.vtu"):
+    coords = dolfin_mesh.coordinates()
+    cells = dolfin_mesh.cells()
+    vtk_cells = np.hstack([np.full((cells.shape[0], 1), 4), cells]).flatten()
+    grid = pv.UnstructuredGrid(vtk_cells, np.full(cells.shape[0], pv.CellType.TETRA), coords)
+
+    f0_arr = f0_func.vector().get_local().reshape(-1, 3)
+    s0_arr = s0_func.vector().get_local().reshape(-1, 3)
+    n0_arr = n0_func.vector().get_local().reshape(-1, 3)
+
+    grid.cell_data["f0"] = f0_arr
+    grid.cell_data["s0"] = s0_arr
+    grid.cell_data["n0"] = n0_arr
+    grid.cell_data["f0_dot_s0"] = np.abs(np.sum(f0_arr * s0_arr, axis=1))
+    grid.cell_data["f0_dot_n0"] = np.abs(np.sum(f0_arr * n0_arr, axis=1))
+    grid.cell_data["s0_dot_n0"] = np.abs(np.sum(s0_arr * n0_arr, axis=1))
+
+    grid.save(out_path)
+    print(f"  Saved {out_path}")
+
+export_coarse_fibres_vtu(dolfin_mesh, f0_coarse, s0_coarse, n0_coarse,
+                          out_path="rodero_05_coarse_"+resolution+"_fibres.vtu")
+
+def gram_schmidt_orthonormalize(f0_arr, s0_arr, n0_arr):
+    """
+    Gram-Schmidt orthonormalization of (f0, s0, n0) triads, row-wise.
+    f0 is treated as the anchor (kept as-is direction, just renormalized).
+    s0 is orthogonalized against f0, then renormalized.
+    n0 is set to f0 x s0 (guarantees exact orthogonality to both), renormalized.
+    """
+    f0_norm = np.linalg.norm(f0_arr, axis=1, keepdims=True)
+    f0_new = f0_arr / np.where(f0_norm > 1e-10, f0_norm, 1.0)
+
+    proj = np.einsum('ij,ij->i', s0_arr, f0_new)[:, None] * f0_new
+    s0_orth = s0_arr - proj
+    s0_norm = np.linalg.norm(s0_orth, axis=1, keepdims=True)
+    degenerate_s0 = (s0_norm < 1e-8).flatten()
+    if degenerate_s0.sum() > 0:
+        print(f"  WARNING: {degenerate_s0.sum()} elements have s0 nearly parallel to f0 after orthogonalization!")
+    s0_new = s0_orth / np.where(s0_norm > 1e-10, s0_norm, 1.0)
+
+    n0_new = np.cross(f0_new, s0_new)
+    n0_norm = np.linalg.norm(n0_new, axis=1, keepdims=True)
+    n0_new = n0_new / np.where(n0_norm > 1e-10, n0_norm, 1.0)
+
+    return f0_new, s0_new, n0_new
+
+
+
+# ── Step 8: Export XDMF for visualisation ────────────────────────────────────
 print("Step 8: Exporting XDMF...")
 
 with dolfin.XDMFFile("rodero_05_coarse_mesh_"+resolution+".xdmf") as xf:

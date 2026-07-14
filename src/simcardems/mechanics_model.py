@@ -43,6 +43,7 @@ def setup_solver(
     linear_solver="gmres",
     use_custom_newton_solver: bool = config.Config.mechanics_use_custom_newton_solver,
     state_prev=None,
+    material_parameters: typing.Optional[dict] = None,
 ):
     """Setup mechanics model with dirichlet boundary conditions or rigid motion."""
 
@@ -50,17 +51,18 @@ def setup_solver(
         return None
     logger.info("Set up mechanics model")
 
-    # Use parameters from Biaxial test in Holzapfel 2019 (Table 1).
-    material_parameters = dict(
-        a=2.28,
-        a_f=1.686,
-        b=9.726,
-        b_f=15.779,
-        a_s=0.0,
-        b_s=0.0,
-        a_fs=0.0,
-        b_fs=0.0,
-    )
+    if material_parameters is None:
+        # Default: Biaxial test parameters from Holzapfel 2019 (Table 1)
+        material_parameters = dict(
+            a=2.28,
+            a_f=1.686,
+            b=9.726,
+            b_f=15.779,
+            a_s=0.0,
+            b_s=0.0,
+            a_fs=0.0,
+            b_fs=0.0,
+        )
 
     active_model = ActiveModel(coupling=coupling, parameters=coupling.cell_params())
     material = pulse.HolzapfelOgden(
