@@ -186,7 +186,24 @@ class BiVCycleRunner(Runner):
             self._pv_file.close()
         if self._pseudo_ecg is not None:
             self._pseudo_ecg.close()
+def check_orthonormality(f0, s0, n0, label=""):
+    def as_array(x):
+        if hasattr(x, "vector"):  # dolfin Function
+            return x.vector().get_local().reshape(-1, 3)
+        return x  # already a numpy array
 
+    F = as_array(f0)
+    S = as_array(s0)
+    N = as_array(n0)
+
+    f0n = np.linalg.norm(F, axis=1)
+    s0n = np.linalg.norm(S, axis=1)
+    n0n = np.linalg.norm(N, axis=1)
+    dot_fs = np.abs(np.sum(F * S, axis=1))
+    dot_fn = np.abs(np.sum(F * N, axis=1))
+    dot_sn = np.abs(np.sum(S * N, axis=1))
+    print(f"{label} f0 norm: {f0n.min():.6f}-{f0n.max():.6f}, "
+          f"max|f0.s0|={dot_fs.max():.3e}, max|f0.n0|={dot_fn.max():.3e}, max|s0.n0|={dot_sn.max():.3e}")
 
 # ── 1. Geometry ────────────────────────────────────────────────────────────────
 mpi_print('Build geometry...')
@@ -196,16 +213,106 @@ from simcardems.geometry import refine_mesh
 
 geo = Geometry.from_file("rodero_05_coarse_"+RESOLUTION+".h5")
 
+import dolfin
+import numpy as np
+
+mesh = dolfin.Mesh()
+with dolfin.HDF5File(mesh.mpi_comm(), "rodero_05_coarse_2mm.h5", "r") as f:
+    f.read(mesh, "mesh", False)
+
+coords = mesh.coordinates()
+cells_arr = mesh.cells()
+
+mpi_print(f"Mesh: {mesh.num_vertices()} vertices, {mesh.num_cells()} cells")
+mpi_print(f"cells() array shape: {cells_arr.shape}")
+
+# ── Volumes ──────────────────────────────────────────────────────────────
+def tet_volumes(coords, cells_arr):
+    p0 = coords[cells_arr[:, 0]]
+    p1 = coords[cells_arr[:, 1]]
+    p2 = coords[cells_arr[:, 2]]
+    p3 = coords[cells_arr[:, 3]]
+    return np.abs(np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0))) / 6.0
+
+volumes = tet_volumes(coords, cells_arr)
+mpi_print(f"Cell volumes: min={volumes.min():.4f}, mean={volumes.mean():.4f}, max={volumes.max():.4f}")
+mpi_print(f"Negative volumes: {np.sum(volumes < 0)}")
+mpi_print(f"Very small volumes (<0.01): {np.sum(volumes < 0.01)}")
+
+# ── Inradius/circumradius quality ratio ──────────────────────────────────
+def tet_quality_ratios(coords, cells_arr):
+    p0 = coords[cells_arr[:, 0]]
+    p1 = coords[cells_arr[:, 1]]
+    p2 = coords[cells_arr[:, 2]]
+    p3 = coords[cells_arr[:, 3]]
+
+    vol = np.abs(np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0))) / 6.0
+
+    def tri_area(a, b, c):
+        return 0.5 * np.linalg.norm(np.cross(b - a, c - a), axis=1)
+
+    A0 = tri_area(p1, p2, p3)
+    A1 = tri_area(p0, p2, p3)
+    A2 = tri_area(p0, p1, p3)
+    A3 = tri_area(p0, p1, p2)
+    surface_area = A0 + A1 + A2 + A3
+
+    inradius = 3 * vol / surface_area
+
+    a = np.linalg.norm(p1 - p0, axis=1)
+    b = np.linalg.norm(p2 - p0, axis=1)
+    c = np.linalg.norm(p3 - p0, axis=1)
+    a1 = np.linalg.norm(p3 - p2, axis=1)
+    b1 = np.linalg.norm(p3 - p1, axis=1)
+    c1 = np.linalg.norm(p2 - p1, axis=1)
+
+    num = np.sqrt(
+        (a*a1 + b*b1 + c*c1) *
+        (a*a1 + b*b1 - c*c1) *
+        (a*a1 - b*b1 + c*c1) *
+        (-a*a1 + b*b1 + c*c1)
+    )
+    circumradius = num / (24 * vol)
+
+    return inradius / circumradius
+
+radii = tet_quality_ratios(coords, cells_arr)
+mpi_print(f"Inradius/circumradius: min={radii.min():.4f}, mean={radii.mean():.4f}")
+mpi_print(f"Poor quality (ratio < 0.1): {np.sum(radii < 0.1)}")
+mpi_print(f"Poor quality (ratio < 0.05): {np.sum(radii < 0.05)}")
+mpi_print(f"Poor quality (ratio < 0.02): {np.sum(radii < 0.02)}")
+
+# Worst offenders, in case a handful of degenerate elements dominate
+worst_idx = np.argsort(radii)[:10]
+mpi_print(f"\nWorst 10 elements (lowest quality ratio):")
+for i in worst_idx:
+    mpi_print(f"  cell {i}: ratio={radii[i]:.5f}, volume={volumes[i]:.5f}")
+
+worst_centres = coords[cells_arr[worst_idx]].mean(axis=1)
+
+mpi_print("Worst 14 element centroids:")
+for i, c in zip(worst_idx, worst_centres):
+    mpi_print(f"  cell {i}: centroid={c}, ratio={radii[i]:.5f}")
+
+# Compare against mesh bounding box / base plane to see if these cluster near the base
+mpi_print(f"\nMesh coordinate ranges:")
+mpi_print(f"  x: {coords[:,0].min():.2f} to {coords[:,0].max():.2f}")
+mpi_print(f"  y: {coords[:,1].min():.2f} to {coords[:,1].max():.2f}")
+mpi_print(f"  z: {coords[:,2].min():.2f} to {coords[:,2].max():.2f}")
+
 # Build refined EP mesh with parent tracking
-ep_mesh = refine_mesh(geo.mesh, num_refinements=2)
+ep_mesh = refine_mesh(geo.mesh, num_refinements=1)
 ffun_ep = dolfin.adapt(geo.ffun, ep_mesh)
 
-biv_geo = BiVentricularGeometry.from_geometry(
-    geo,
-    ep_mesh=ep_mesh,
-    ffun_ep=ffun_ep,
-    parameters={"num_refinements": 2},
-)
+#biv_geo = BiVentricularGeometry.from_geometry(
+#    geo,
+#    ep_mesh=ep_mesh,
+#    ffun_ep=ffun_ep,
+#    parameters={"num_refinements": 1},
+#)
+
+biv_geo = BiVentricularGeometry.from_geometry(geo, ep_mesh=geo.mesh, ffun_ep=geo.ffun)
+
 mpi_print(f"EP Mesh vertices: {biv_geo.ep_mesh.num_vertices()}")
 mpi_print(f"Mechanics Mesh vertices: {biv_geo.mechanics_mesh.num_vertices()}")
 
@@ -233,6 +340,19 @@ valve_fn = map_dense_field_to_ep_mesh(
 mpi_print(f'Mechanics valve plug elements: {int(is_valve.sum())}')
 biv_geo.valve_mask = valve_fn
 
+f0 = biv_geo.f0
+s0 = biv_geo.s0
+n0 = biv_geo.n0
+
+results = check_orthonormality(f0, s0, n0)
+
+epi_marker = geo.markers["EPI"][0]
+base_marker = geo.markers["BASE"][0]
+ffun_arr = geo.ffun.array()
+mpi_print(f"EPI marker {epi_marker}: {np.sum(ffun_arr == epi_marker)} facets")
+mpi_print(f"BASE marker {base_marker}: {np.sum(ffun_arr == base_marker)} facets")
+mpi_print(f"Total facets: {len(ffun_arr)}")
+
 # ── 2. Activation times ────────────────────────────────────────────────────────
 
 mpi_print('Load activation times...')
@@ -253,7 +373,6 @@ act_fn = interpolate_activation_to_ep_mesh(
     activation_times_mech=activation_times,
     coords_subset_mech=coords_subset,
 )
-
 
 # ── 3. Stimulus domain ─────────────────────────────────────────────────────────
 
@@ -279,13 +398,12 @@ config.outdir                             = "biv_coarse_run_output"
 config.coupling_type                      = "fully_coupled_Tor_Land"
 config.save_freq                          = 20
 config.linear_mechanics_solver            = "mumps"
-config.spring                             = 10.0
+config.spring                             = 1000.0
 config.traction                           = 0.001
 config.mechanics_use_custom_newton_solver = True
 config.mechanics_solve_strategy           = "hybrid"
 config.mech_threshold                     = 1.0
-config.relaxation_factor                  = 0.3
-# config.set_material                       = "Guccione"
+config.relaxation_factor                  = 1.0
 
 
 # ── 5. Spatial fields ──────────────────────────────────────────────────────────
