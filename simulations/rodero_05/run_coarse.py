@@ -1,4 +1,7 @@
 import os
+
+from simulations.rodero_05.run_mechanics_only import material_parameters
+
 cache_dir = os.environ.get("FENICS_CACHE_DIR", os.path.expanduser("~/.cache"))
 os.environ["XDG_CACHE_HOME"] = cache_dir
 
@@ -404,7 +407,13 @@ config.mechanics_use_custom_newton_solver = True
 config.mechanics_solve_strategy           = "hybrid"
 config.mech_threshold                     = 1.0
 config.relaxation_factor                  = 1.0
-
+material_params_override = dict(
+    a=2.28 * 10.0,
+    a_f=1.686 * 10.0,
+    b=9.726,
+    b_f=15.779,
+    a_s=0.0, b_s=0.0, a_fs=0.0, b_fs=0.0,
+)
 
 # ── 5. Spatial fields ──────────────────────────────────────────────────────────
 
@@ -428,6 +437,7 @@ coupling = em_model.setup_EM_model_from_config(
     activation_times=act_fn,
     celltype_function=cell_fn,
     iks_scale_function=iks_fn,
+    material_parameters=material_params_override
 )
 
 mpi_print(f"----------------------------State space dim: {coupling.mech_solver.state_space.dim()}")
