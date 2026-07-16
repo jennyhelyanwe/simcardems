@@ -37,8 +37,10 @@ def build_mesh(node_coords: np.ndarray, element_connectivity: np.ndarray) -> dol
         editor.add_cell(i, conn)
 
     editor.close()
+    mesh.order()  # ADD THIS
     mesh.init()
     return mesh
+
 
 
 # --- 2. Build the facet function (ffun) --------------------------------

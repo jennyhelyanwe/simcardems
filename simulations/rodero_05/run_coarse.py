@@ -1,7 +1,5 @@
 import os
 
-from simulations.rodero_05.run_mechanics_only import material_parameters
-
 cache_dir = os.environ.get("FENICS_CACHE_DIR", os.path.expanduser("~/.cache"))
 os.environ["XDG_CACHE_HOME"] = cache_dir
 
@@ -41,7 +39,10 @@ def mpi_print(*args, **kwargs):
     if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
         print(*args, **kwargs, flush=True)
 
-RESOLUTION = "2mm"
+mpi_print('dolfin:', dolfin.__version__)
+import petsc4py; mpi_print('petsc4py:', petsc4py.__version__)
+from petsc4py import PETSc; mpi_print('PETSc:', PETSc.Sys.getVersion())
+RESOLUTION = "4mm"
 
 # ── Warm start configuration ──────────────────────────────────────────────────
 WARM_START_T_MS = None  # Set to e.g. 100.0 to restart from t=100ms, or None for fresh start
@@ -285,6 +286,7 @@ mpi_print(f"Poor quality (ratio < 0.1): {np.sum(radii < 0.1)}")
 mpi_print(f"Poor quality (ratio < 0.05): {np.sum(radii < 0.05)}")
 mpi_print(f"Poor quality (ratio < 0.02): {np.sum(radii < 0.02)}")
 
+
 # Worst offenders, in case a handful of degenerate elements dominate
 worst_idx = np.argsort(radii)[:10]
 mpi_print(f"\nWorst 10 elements (lowest quality ratio):")
@@ -304,8 +306,8 @@ mpi_print(f"  y: {coords[:,1].min():.2f} to {coords[:,1].max():.2f}")
 mpi_print(f"  z: {coords[:,2].min():.2f} to {coords[:,2].max():.2f}")
 
 # Build refined EP mesh with parent tracking
-ep_mesh = refine_mesh(geo.mesh, num_refinements=1)
-ffun_ep = dolfin.adapt(geo.ffun, ep_mesh)
+# ep_mesh = refine_mesh(geo.mesh, num_refinements=1)
+# ffun_ep = dolfin.adapt(geo.ffun, ep_mesh)
 
 #biv_geo = BiVentricularGeometry.from_geometry(
 #    geo,
@@ -394,8 +396,8 @@ biv_geo.stimulus_domain = stim_domain
 mpi_print('Configuring...')
 config = Config()
 config.T                                  = 800.0
-config.dt                                 = 1.0
-config.dt_mech                            = 5.0
+config.dt                                 = 0.1 #1.0
+config.dt_mech                            = 0.5 # 5.0
 config.geometry_path                      = "rodero_05_coarse_"+RESOLUTION+".h5"
 config.outdir                             = "biv_coarse_run_output"
 config.coupling_type                      = "fully_coupled_Tor_Land"
@@ -406,14 +408,28 @@ config.traction                           = 0.001
 config.mechanics_use_custom_newton_solver = True
 config.mechanics_solve_strategy           = "hybrid"
 config.mech_threshold                     = 1.0
-config.relaxation_factor                  = 1.0
+config.relaxation_factor                  = 0.3
+MATERIAL_SCALE = 1
 material_params_override = dict(
-    a=2.28 * 10.0,
-    a_f=1.686 * 10.0,
-    b=9.726,
-    b_f=15.779,
-    a_s=0.0, b_s=0.0, a_fs=0.0, b_fs=0.0,
+    a=0.61 * MATERIAL_SCALE,
+    a_f=1.56* MATERIAL_SCALE,
+    b=7.5,
+    b_f=35.31,
+    a_s=0.70* MATERIAL_SCALE,
+    b_s=33.24,
+    a_fs=0.46* MATERIAL_SCALE,
+    b_fs=5.09,
 )
+# material_params_override = dict(
+#     a=2.28,
+#     a_f=1.686,
+#     b=9.726,
+#     b_f=15.779,
+#     a_s=0.0,
+#     b_s=0.0,
+#     a_fs=0.0,
+#     b_fs=0.0,
+# )
 
 # ── 5. Spatial fields ──────────────────────────────────────────────────────────
 

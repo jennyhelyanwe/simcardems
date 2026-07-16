@@ -202,7 +202,8 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
         valve_mask = getattr(self.geometry, 'valve_mask', None)
         if valve_mask is not None:
             # Stiff Neo-Hookean for valve plug elements
-            stiffness_scale = valve_mask * dolfin.Constant(50.0) + (1.0 - valve_mask) * dolfin.Constant(1.0)
+            # stiffness_scale = valve_mask * dolfin.Constant(50.0) + (1.0 - valve_mask) * dolfin.Constant(1.0)
+            stiffness_scale = dolfin.Constant(1.0)
             internal_energy = (
                     stiffness_scale * self.material.strain_energy(self._F)
                     + self.material.compressibility(p, self._J)
@@ -496,6 +497,12 @@ def create_problem(
         bcs,
         solver_parameters={
             "linear_solver": "mumps",
+            "petsc": {
+                "ksp_type": "preonly",
+                "pc_type": "lu",
+                "pc_factor_mat_solver_type": "mumps",
+                "mat_mumps_icntl_33": 0,
+            },
             "relative_tolerance": 1e-5,
             "absolute_tolerance": 1e-5,
             "maximum_iterations": 20,

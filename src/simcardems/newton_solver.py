@@ -244,18 +244,62 @@ class MechanicsNewtonSolver_ODE(MechanicsNewtonSolver):
         self._state.vector().set_local(x)
         self._state.vector().apply("insert")
 
-        # check det(F) of the candidate state
         import dolfin
+        import os
         u = self._state.split(deepcopy=True)[0]
         F = dolfin.Identity(3) + dolfin.grad(u)
         DG0 = dolfin.FunctionSpace(self._state.function_space().mesh(), "DG", 0)
-        Jp = dolfin.project(dolfin.det(F), DG0).vector().get_local()
+        Jp_fn = dolfin.project(dolfin.det(F), DG0)
+        Jp = Jp_fn.vector().get_local()
         rank = dolfin.MPI.rank(dolfin.MPI.comm_world)
-        if len(Jp) and (Jp <= 0).any():
+        comm = self._state.function_space().mesh().mpi_comm()
+
+        local_bad = 1 if (len(Jp) and (Jp <= 0).any()) else 0
+        any_bad = dolfin.MPI.max(comm, local_bad)  # collective: does ANY rank have a bad element?
+
+        if local_bad:
             idx = Jp.argmin()
             c = dolfin.Cell(self._state.function_space().mesh(), idx).midpoint()
             print(
                 f"[detF] iter{i} rank{rank}: min={Jp.min():.3e} n_bad={(Jp <= 0).sum()} worst@({c.x():.1f},{c.y():.1f},{c.z():.1f})",
                 flush=True)
+
+        if any_bad:
+            # ALL ranks must enter together, regardless of local_bad
+            dump_dir = os.environ.get("DETF_DUMP_DIR", "detf_dumps")
+            if rank == 0:
+                os.makedirs(dump_dir, exist_ok=True)
+            dolfin.MPI.barrier(comm)
+            dump_path = os.path.join(dump_dir, f"detf_fail_iter{i}.h5")
+            with dolfin.HDF5File(comm, dump_path, "w") as f:
+                f.write(self._state.function_space().mesh(), "mesh")
+                f.write(u, "u")
+                f.write(Jp_fn, "detF")
+            if rank == 0:
+                print(f"[detF] dumped state to {dump_path}", flush=True)
+
+        # # I1 check - unconditional, every rank, every iteration
+        # C = F.T * F
+        # I1 = dolfin.tr(C)
+        # I1p = dolfin.project(I1, DG0).vector().get_local()
+        #
+        # idx_bad = I1p.argmax()
+        # cell = dolfin.Cell(self._state.function_space().mesh(), idx_bad)
+        # verts = cell.entities(0)
+        # V_disp = self._state.function_space().sub(0).collapse()
+        # u_fn = dolfin.project(u, V_disp)
+        # u_vals = u_fn.compute_vertex_values().reshape(3, -1).T
+        # print(f"[I1-detail] iter{i} rank{rank}: cell {idx_bad} vertex displacements:")
+        # for v in verts:
+        #     coord = self._state.function_space().mesh().coordinates()[v]
+        #     print(f"  vertex {v} at {coord}: u={u_vals[v]}")
+        #
+        # if len(I1p):
+        #     idx1 = I1p.argmax()
+        #     c1 = dolfin.Cell(self._state.function_space().mesh(), idx1).midpoint()
+        #     print(
+        #         f"[I1] iter{i} rank{rank}: max={I1p.max():.3e} "
+        #         f"worst@({c1.x():.1f},{c1.y():.1f},{c1.z():.1f})",
+        #         flush=True)
 
         self._update_cb()
