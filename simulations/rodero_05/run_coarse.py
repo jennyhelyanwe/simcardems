@@ -40,13 +40,14 @@ from simcardems.biv_cavity_cycle_controller import (
 from simcardems.postprocess import ecg_recovery
 from simcardems.geometry import refine_mesh
 from simcardems import utils
-logger = utils.getLogger(__name__)
 
+import time
+t_script_start = time.time()
+
+logger = utils.getLogger(__name__)
 def mpi_print(*args, **kwargs):
     if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
         print(*args, **kwargs, flush=True)
-
-
 logger.info(['dolfin:', dolfin.__version__])
 import petsc4py; logger.info(['petsc4py:', petsc4py.__version__])
 from petsc4py import PETSc; logger.info(['PETSc:', PETSc.Sys.getVersion()])
@@ -662,3 +663,8 @@ except Exception as e:
 finally:
     runner.close_files()
     logger.info("Done.")
+
+t_script_end = time.time()
+logger.info(f"TOTAL SCRIPT WALLCLOCK TIME: {t_script_end - t_script_start:.2f}s "
+            f"({(t_script_end - t_script_start)/60:.2f} min) "
+            f"at {dolfin.MPI.size(dolfin.MPI.comm_world)} ranks")
