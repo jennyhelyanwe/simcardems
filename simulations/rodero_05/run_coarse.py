@@ -8,6 +8,7 @@ logging.getLogger("simcardems.newton_solver").setLevel(logging.DEBUG)
 logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.WARNING)
 logging.getLogger("simcardems.runner").setLevel(logging.DEBUG)
 logging.getLogger("simcardems.models.fully_coupled_Tor_Land.em_model").setLevel(logging.DEBUG)
+logging.getLogger("__main__").setLevel(logging.DEBUG)
 import dataclasses
 import dolfin
 dolfin.PETScOptions.set("mat_mumps_icntl_4", "0")
@@ -135,8 +136,6 @@ class BiVCycleRunner(Runner):
         import time
         t0 = time.time()
         self.coupling.solve_mechanics()
-        t1 = time.time()
-        logger.debug(f"  Mechanics solve time: {t1 - t0:.2f}s")
         self.coupling.update_prev_mechanics()
         self.coupling.mechanics_to_coupling()
         self.coupling.coupling_to_ep()
@@ -148,6 +147,8 @@ class BiVCycleRunner(Runner):
             t=t_ms,
             dt=dt_ms,
         )
+        t1 = time.time()
+        logger.debug(f"  Mechanics solve time: {t1 - t0:.2f}s")
         lv = self._cycle_controller.lv_state
         rv = self._cycle_controller.rv_state
 
