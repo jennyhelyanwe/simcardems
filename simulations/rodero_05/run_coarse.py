@@ -35,7 +35,7 @@ from simcardems.biv_cavity_cycle_controller import (
     Phase,
 )
 from simcardems.postprocess import ecg_recovery
-
+from simcardems.geometry import refine_mesh
 
 def mpi_print(*args, **kwargs):
     if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
@@ -290,7 +290,18 @@ mpi_print(f"Poor quality (ratio < 0.1): {np.sum(radii < 0.1)}")
 mpi_print(f"Poor quality (ratio < 0.05): {np.sum(radii < 0.05)}")
 mpi_print(f"Poor quality (ratio < 0.02): {np.sum(radii < 0.02)}")
 
-biv_geo = BiVentricularGeometry.from_geometry(geo, ep_mesh=geo.mesh, ffun_ep=geo.ffun)
+
+# Build refined EP mesh with parent tracking
+NUM_REFINEMENTS = 1
+ep_mesh = refine_mesh(geo.mesh, num_refinements=NUM_REFINEMENTS)
+ffun_ep = dolfin.adapt(geo.ffun, ep_mesh)
+
+biv_geo = BiVentricularGeometry.from_geometry(
+    geo,
+    ep_mesh=ep_mesh,
+    ffun_ep=ffun_ep,
+    parameters={"num_refinements": NUM_REFINEMENTS},
+)
 
 mpi_print(f"EP Mesh vertices: {biv_geo.ep_mesh.num_vertices()}")
 mpi_print(f"Mechanics Mesh vertices: {biv_geo.mechanics_mesh.num_vertices()}")
@@ -401,6 +412,16 @@ material_params_override = dict(
 #     b_s=33.24,
 #     a_fs=0.46* MATERIAL_SCALE,
 #     b_fs=5.09,
+# )
+# material_params_override = dict(
+#     a=0.059,
+#     b=0.023,
+#     a_f=18.472,
+#     b_f=16.026,
+#     a_s=2.481,
+#     b_s=11.120,
+#     a_fs=0.216,
+#     b_fs=11.436,
 # )
 
 # ── 5. Spatial fields ──────────────────────────────────────────────────────────
