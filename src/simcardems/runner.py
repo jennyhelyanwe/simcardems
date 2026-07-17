@@ -207,7 +207,11 @@ class Runner:
 
             # Solve EP model
             self.coupling.t = TimeStepper.ns2ms(t)
+            import time
+            t0_ep = time.time()
             self.coupling.solve_ep((TimeStepper.ns2ms(t0), TimeStepper.ns2ms(t)))
+            t1_ep = time.time()
+            logger.debug(f"  EP solve time: {t1_ep - t0_ep:.3f}s")
             self._post_ep()
 
             if self._solve_mechanics_now():

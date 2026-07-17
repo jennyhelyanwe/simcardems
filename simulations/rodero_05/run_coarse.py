@@ -6,6 +6,8 @@ os.environ["XDG_CACHE_HOME"] = cache_dir
 import logging
 logging.getLogger("simcardems.newton_solver").setLevel(logging.DEBUG)
 logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.WARNING)
+logging.getLogger("simcardems.runner").setLevel(logging.DEBUG)
+logging.getLogger("simcardems.models.fully_coupled_Tor_Land.em_model").setLevel(logging.DEBUG)
 import dataclasses
 import dolfin
 dolfin.PETScOptions.set("mat_mumps_icntl_4", "0")
@@ -36,15 +38,17 @@ from simcardems.biv_cavity_cycle_controller import (
 )
 from simcardems.postprocess import ecg_recovery
 from simcardems.geometry import refine_mesh
+from simcardems import utils
+logger = utils.getLogger(__name__)
 
 def mpi_print(*args, **kwargs):
     if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
         print(*args, **kwargs, flush=True)
 
 
-mpi_print('dolfin:', dolfin.__version__)
-import petsc4py; mpi_print('petsc4py:', petsc4py.__version__)
-from petsc4py import PETSc; mpi_print('PETSc:', PETSc.Sys.getVersion())
+logger.info(['dolfin:', dolfin.__version__])
+import petsc4py; logger.info(['petsc4py:', petsc4py.__version__])
+from petsc4py import PETSc; logger.info(['PETSc:', PETSc.Sys.getVersion()])
 
 RESOLUTION = "4mm"
 MESH_DIR = "meshes/"
@@ -52,7 +56,6 @@ RESULTS_DIR = "results/"
 
 # ── Warm start configuration ──────────────────────────────────────────────────
 WARM_START_T_MS = None  # Set to e.g. 100.0 to restart from t=100ms, or None for fresh start
-
 
 # ── PseudoECG ──────────────────────────────────────────────────────────────────
 
@@ -133,7 +136,7 @@ class BiVCycleRunner(Runner):
         t0 = time.time()
         self.coupling.solve_mechanics()
         t1 = time.time()
-        mpi_print(f"  Mechanics solve time: {t1 - t0:.2f}s")
+        logger.debug(f"  Mechanics solve time: {t1 - t0:.2f}s")
         self.coupling.update_prev_mechanics()
         self.coupling.mechanics_to_coupling()
         self.coupling.coupling_to_ep()
@@ -148,7 +151,7 @@ class BiVCycleRunner(Runner):
         lv = self._cycle_controller.lv_state
         rv = self._cycle_controller.rv_state
 
-        mpi_print(
+        logger.debug(
             f"  → t={t_ms:.1f} ms"
             f"  LV phase={lv.phase}  LVP={lv.pressure_n:.3f} kPa  LVV={lv.volume_n/1000:.2f} mL"
             f"  RV phase={rv.phase}  RVP={rv.pressure_n:.3f} kPa  RVV={rv.volume_n/1000:.2f} mL"
@@ -216,7 +219,7 @@ def check_orthonormality(f0, s0, n0, label=""):
 
 
 # ── 1. Geometry ────────────────────────────────────────────────────────────────
-mpi_print('Build geometry...')
+logger.info('Build geometry...')
 from cardiac_geometries.geometry import Geometry
 from simcardems.bivgeometry import BiVentricularGeometry
 
@@ -229,9 +232,7 @@ with dolfin.HDF5File(mesh.mpi_comm(), MESH_DIR + "rodero_05_coarse_" + RESOLUTIO
 coords = mesh.coordinates()
 cells_arr = mesh.cells()
 
-mpi_print(f"Mesh: {mesh.num_vertices()} vertices, {mesh.num_cells()} cells")
-mpi_print(f"cells() array shape: {cells_arr.shape}")
-
+logger.info(f"Mesh: {mesh.num_vertices()} vertices, {mesh.num_cells()} cells")
 
 def tet_volumes(coords, cells_arr):
     p0 = coords[cells_arr[:, 0]]
@@ -242,9 +243,9 @@ def tet_volumes(coords, cells_arr):
 
 
 volumes = tet_volumes(coords, cells_arr)
-mpi_print(f"Cell volumes: min={volumes.min():.4f}, mean={volumes.mean():.4f}, max={volumes.max():.4f}")
-mpi_print(f"Negative volumes: {np.sum(volumes < 0)}")
-mpi_print(f"Very small volumes (<0.01): {np.sum(volumes < 0.01)}")
+logger.debug(f"Cell volumes: min={volumes.min():.4f}, mean={volumes.mean():.4f}, max={volumes.max():.4f}")
+logger.debug(f"Negative volumes: {np.sum(volumes < 0)}")
+logger.debug(f"Very small volumes (<0.01): {np.sum(volumes < 0.01)}")
 
 
 def tet_quality_ratios(coords, cells_arr):
@@ -285,26 +286,29 @@ def tet_quality_ratios(coords, cells_arr):
 
 
 radii = tet_quality_ratios(coords, cells_arr)
-mpi_print(f"Inradius/circumradius: min={radii.min():.4f}, mean={radii.mean():.4f}")
-mpi_print(f"Poor quality (ratio < 0.1): {np.sum(radii < 0.1)}")
-mpi_print(f"Poor quality (ratio < 0.05): {np.sum(radii < 0.05)}")
-mpi_print(f"Poor quality (ratio < 0.02): {np.sum(radii < 0.02)}")
+logger.debug(f"Inradius/circumradius: min={radii.min():.4f}, mean={radii.mean():.4f}")
+logger.debug(f"Poor quality (ratio < 0.1): {np.sum(radii < 0.1)}")
+logger.debug(f"Poor quality (ratio < 0.05): {np.sum(radii < 0.05)}")
+logger.debug(f"Poor quality (ratio < 0.02): {np.sum(radii < 0.02)}")
 
 
 # Build refined EP mesh with parent tracking
-NUM_REFINEMENTS = 1
-ep_mesh = refine_mesh(geo.mesh, num_refinements=NUM_REFINEMENTS)
-ffun_ep = dolfin.adapt(geo.ffun, ep_mesh)
+NUM_REFINEMENTS = 0
+if NUM_REFINEMENTS > 1:
+    ep_mesh = refine_mesh(geo.mesh, num_refinements=NUM_REFINEMENTS)
+    ffun_ep = dolfin.adapt(geo.ffun, ep_mesh)
 
-biv_geo = BiVentricularGeometry.from_geometry(
-    geo,
-    ep_mesh=ep_mesh,
-    ffun_ep=ffun_ep,
-    parameters={"num_refinements": NUM_REFINEMENTS},
-)
+    biv_geo = BiVentricularGeometry.from_geometry(
+        geo,
+        ep_mesh=ep_mesh,
+        ffun_ep=ffun_ep,
+        parameters={"num_refinements": NUM_REFINEMENTS},
+    )
+else:
+    biv_geo = BiVentricularGeometry.from_geometry(geo, ep_mesh=geo.mesh, ffun_ep=geo.ffun)
 
-mpi_print(f"EP Mesh vertices: {biv_geo.ep_mesh.num_vertices()}")
-mpi_print(f"Mechanics Mesh vertices: {biv_geo.mechanics_mesh.num_vertices()}")
+logger.info(f"EP Mesh vertices: {biv_geo.ep_mesh.num_vertices()}")
+logger.info(f"Mechanics Mesh vertices: {biv_geo.mechanics_mesh.num_vertices()}")
 
 # Load valve plug mask
 coarse_tv = np.load(MESH_DIR + '/rodero_05_coarse_' + RESOLUTION + '_tv.npy')
@@ -319,7 +323,7 @@ valve_fn = map_dense_field_to_ep_mesh(
     is_valve_float,
 )
 
-mpi_print(f'Mechanics valve plug elements: {int(is_valve_float.sum())}')
+logger.debug(f'Mechanics valve plug elements: {int(is_valve_float.sum())}')
 biv_geo.valve_mask = valve_fn
 
 check_orthonormality(biv_geo.f0, biv_geo.s0, biv_geo.n0)
@@ -327,20 +331,20 @@ check_orthonormality(biv_geo.f0, biv_geo.s0, biv_geo.n0)
 epi_marker = geo.markers["EPI"][0]
 base_marker = geo.markers["BASE"][0]
 ffun_arr = geo.ffun.array()
-mpi_print(f"EPI marker {epi_marker}: {np.sum(ffun_arr == epi_marker)} facets")
-mpi_print(f"BASE marker {base_marker}: {np.sum(ffun_arr == base_marker)} facets")
-mpi_print(f"Total facets: {len(ffun_arr)}")
+logger.debug(f"EPI marker {epi_marker}: {np.sum(ffun_arr == epi_marker)} facets")
+logger.debug(f"BASE marker {base_marker}: {np.sum(ffun_arr == base_marker)} facets")
+logger.debug(f"Total facets: {len(ffun_arr)}")
 
 
 f0_arr = biv_geo.f0.vector().get_local().reshape(-1, 3)
 s0_arr = biv_geo.s0.vector().get_local().reshape(-1, 3)
 dot_fs = np.sum(f0_arr * s0_arr, axis=1)
-mpi_print(f"f0.s0 range on 4mm mesh: {dot_fs.min():.6f} to {dot_fs.max():.6f}")
-mpi_print(f"Number of cells with |f0.s0| > 0.5: {np.sum(np.abs(dot_fs) > 0.5)}")
+logger.debug(f"f0.s0 range on 4mm mesh: {dot_fs.min():.6f} to {dot_fs.max():.6f}")
+logger.debug(f"Number of cells with |f0.s0| > 0.5: {np.sum(np.abs(dot_fs) > 0.5)}")
 
 # ── 2. Activation times ────────────────────────────────────────────────────────
 
-mpi_print('Load activation times...')
+logger.info('Load activation times...')
 node_coords = pd.read_csv(
     MESH_DIR + "/rodero_05_fine_xyz.csv", header=None
 ).to_numpy() * 10.0
@@ -361,7 +365,7 @@ act_fn = interpolate_activation_to_ep_mesh(
 
 # ── 3. Stimulus domain ─────────────────────────────────────────────────────────
 
-mpi_print('Create stimulus domain...')
+logger.info('Create stimulus domain...')
 stim_domain = endocardial_stimulus_domain(
     mesh=biv_geo.ep_mesh,
     ffun=biv_geo.ffun_ep,
@@ -372,7 +376,7 @@ biv_geo.stimulus_domain = stim_domain
 
 # ── 4. Config ──────────────────────────────────────────────────────────────────
 
-mpi_print('Configuring...')
+logger.info('Configuring...')
 config = Config()
 config.T = 800.0
 config.dt = 0.5
@@ -388,6 +392,11 @@ config.mechanics_use_custom_newton_solver = True
 config.mechanics_solve_strategy = "hybrid"
 config.mech_threshold = 1.0
 config.relaxation_factor = 0.3
+# Scalability test
+SCALABILITY_TEST = os.environ.get("SCALABILITY_TEST", "0") == "1"
+if SCALABILITY_TEST:
+    config.T = 20.0  # just enough for a handful of EP+mechanics steps
+    config.save_freq = 1000.0  # effectively disable checkpoint I/O, which would skew timing
 
 # Reverted (transversely isotropic) material parameters - known-good baseline.
 # The full orthotropic set is a separate, still-open experiment - see notes.
@@ -426,46 +435,46 @@ material_params_override = dict(
 
 # ── 5. Spatial fields ──────────────────────────────────────────────────────────
 
-mpi_print('Load cell type...')
+logger.info('Load cell type...')
 ct_values = load_dense_node_field(MESH_DIR + "rodero_05_fine_nodefield_cell-type.csv")
 cell_fn = map_dense_field_to_dg0_function(
     biv_geo.ep_mesh, node_coords, ct_values, {1: 0, 2: 2, 3: 1}
 )
 
-mpi_print('Load sf IKs...')
+logger.info('Load sf IKs...')
 iks_values = load_dense_node_field(MESH_DIR + "rodero_05_fine_nodefield_sf_IKs.csv")
 iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
 
 # ── 6. EM coupling ─────────────────────────────────────────────────────────────
 # ── Parameter summary: print everything that affects the solve, up front ──
 VALVE_STIFFNESS_SCALE = 5.0
-mpi_print("\n" + "=" * 60)
-mpi_print("RUN PARAMETERS")
-mpi_print("=" * 60)
-mpi_print(f"Resolution:                {RESOLUTION}")
-mpi_print(f"T (total time):            {config.T} ms")
-mpi_print(f"dt (EP):                   {config.dt} ms")
-mpi_print(f"dt_mech:                   {config.dt_mech} ms")
-mpi_print(f"Coupling type:             {config.coupling_type}")
-mpi_print(f"Linear mechanics solver:   {config.linear_mechanics_solver}")
-mpi_print(f"Custom Newton solver:      {config.mechanics_use_custom_newton_solver}")
-mpi_print(f"Mechanics solve strategy:  {config.mechanics_solve_strategy}")
-mpi_print(f"Mech threshold:            {config.mech_threshold}")
-mpi_print(f"Relaxation factor:         {config.relaxation_factor}")
-mpi_print(f"Spring (EPI Robin):        {config.spring}")
-mpi_print(f"Traction (initial):        {config.traction}")
-mpi_print(f"Valve stiffness scale:     {VALVE_STIFFNESS_SCALE}")
-mpi_print("-" * 60)
-mpi_print("Material parameters:")
+logger.info("" + "=" * 60)
+logger.info("RUN PARAMETERS")
+logger.info("=" * 60)
+logger.info(f"Resolution:                {RESOLUTION}")
+logger.info(f"T (total time):            {config.T} ms")
+logger.info(f"dt (EP):                   {config.dt} ms")
+logger.info(f"dt_mech:                   {config.dt_mech} ms")
+logger.info(f"Coupling type:             {config.coupling_type}")
+logger.info(f"Linear mechanics solver:   {config.linear_mechanics_solver}")
+logger.info(f"Custom Newton solver:      {config.mechanics_use_custom_newton_solver}")
+logger.info(f"Mechanics solve strategy:  {config.mechanics_solve_strategy}")
+logger.info(f"Mech threshold:            {config.mech_threshold}")
+logger.info(f"Relaxation factor:         {config.relaxation_factor}")
+logger.info(f"Spring (EPI Robin):        {config.spring}")
+logger.info(f"Traction (initial):        {config.traction}")
+logger.info(f"Valve stiffness scale:     {VALVE_STIFFNESS_SCALE}")
+logger.info("-" * 60)
+logger.info("Material parameters:")
 for k, v in material_params_override.items():
-    mpi_print(f"  {k:6s} = {v}")
-mpi_print("-" * 60)
-mpi_print(f"Save frequency:            {config.save_freq}")
-mpi_print(f"Output directory:          {config.outdir}")
-mpi_print(f"Warm start:                {WARM_START_T_MS}")
-mpi_print("=" * 60 + "\n")
+    logger.info(f"  {k:6s} = {v}")
+logger.info("-" * 60)
+logger.info(f"Save frequency:            {config.save_freq}")
+logger.info(f"Output directory:          {config.outdir}")
+logger.info(f"Warm start:                {WARM_START_T_MS}")
+logger.info("=" * 60)
 
-mpi_print('Setting up EM model...')
+logger.info('Setting up EM model...')
 coupling = em_model.setup_EM_model_from_config(
     config, geometry=biv_geo, activation_times=act_fn,
     celltype_function=cell_fn, iks_scale_function=iks_fn,
@@ -474,17 +483,6 @@ coupling = em_model.setup_EM_model_from_config(
 )
 
 mech_problem = coupling.mech_solver
-
-mpi_print(f"----------------------------State space dim: {coupling.mech_solver.state_space.dim()}")
-
-mpi_print(f"BCs at preload: neumann={len(mech_problem.bcs.neumann)} robin={len(mech_problem.bcs.robin)} dirichlet={len(mech_problem.bcs.dirichlet)}")
-for nbc in mech_problem.bcs.neumann:
-    mpi_print(f"  Neumann: marker={nbc.marker} traction={float(nbc.traction):.6e}")
-for rbc in mech_problem.bcs.robin:
-    mpi_print(f"  Robin: marker={rbc.marker} value={float(rbc.value):.6e}")
-for dbc in mech_problem.bcs.dirichlet:
-    mpi_print(f"  Dirichlet: {dbc}")
-mpi_print(f"  _dirichlet_bc: {mech_problem._dirichlet_bc}")
 
 # ── 7. Cycle controller ────────────────────────────────────────────────────────
 
@@ -495,13 +493,13 @@ lv_pressure_const = None
 rv_pressure_const = None
 
 for nbc in mech_problem.bcs.neumann:
-    mpi_print(f"Found Neumann BC: marker={nbc.marker} traction={float(nbc.traction):.6e}")
+    logger.debug(f"Found Neumann BC: marker={nbc.marker} traction={float(nbc.traction):.6e}")
     if nbc.marker == LV_ENDO_MARKER:
         lv_pressure_const = nbc.traction
     elif nbc.marker == RV_ENDO_MARKER:
         rv_pressure_const = nbc.traction
 
-mpi_print(f"Total Neumann BCs: {len(mech_problem.bcs.neumann)}")
+logger.debug(f"Total Neumann BCs: {len(mech_problem.bcs.neumann)}")
 
 if lv_pressure_const is None:
     raise RuntimeError("No Neumann BC found on ENDO_LV")
@@ -561,12 +559,12 @@ cycle_controller = BiVCycleController(
 
 u0, _ = mech_problem.state.split(deepcopy=True)
 cycle_controller.initialize(u0)
-mpi_print(f"Initial LV volume: {lv_state.volume_n:.2f}")
-mpi_print(f"Initial RV volume: {rv_state.volume_n:.2f}")
+logger.debug(f"Initial LV volume: {lv_state.volume_n:.2f}")
+logger.debug(f"Initial RV volume: {rv_state.volume_n:.2f}")
 
 # ── 8. Pseudo-ECG ─────────────────────────────────────────────────────────────
 
-mpi_print('Loading electrode locations...')
+logger.info('Loading electrode locations...')
 electrode_df = pd.read_csv(
     MESH_DIR + "rodero_05_fine_nodefield_electrode_xyz.csv",
     header=None, names=["x", "y", "z"],
@@ -619,24 +617,24 @@ runner.set_cycle_controller(
     t_restart=t_restart,
 )
 
-bc = mech_problem._dirichlet_bc
-if isinstance(bc, list):
-    mpi_print(f"_dirichlet_bc is a list of {len(bc)} BCs")
-    total = 0
-    for i, b in enumerate(bc):
-        n = len(b.get_boundary_values())
-        mpi_print(f"  BC {i}: {n} dofs")
-        total += n
-    mpi_print(f"  Total constrained dofs: {total}")
-else:
-    mpi_print(f"_dirichlet_bc is a single BC with {len(bc.get_boundary_values())} dofs")
-mpi_print(f"Expected EPI+BASE dofs: {len(dolfin.DirichletBC(mech_problem.state_space.sub(0), dolfin.Constant((0, 0, 0)), biv_geo.ffun, biv_geo.markers['EPI'][0]).get_boundary_values()) + len(dolfin.DirichletBC(mech_problem.state_space.sub(0), dolfin.Constant((0, 0, 0)), biv_geo.ffun, biv_geo.markers['BASE'][0]).get_boundary_values())}")
+# bc = mech_problem._dirichlet_bc
+# if isinstance(bc, list):
+#     mpi_print(f"_dirichlet_bc is a list of {len(bc)} BCs")
+#     total = 0
+#     for i, b in enumerate(bc):
+#         n = len(b.get_boundary_values())
+#         mpi_print(f"  BC {i}: {n} dofs")
+#         total += n
+#     mpi_print(f"  Total constrained dofs: {total}")
+# else:
+#     mpi_print(f"_dirichlet_bc is a single BC with {len(bc.get_boundary_values())} dofs")
+# mpi_print(f"Expected EPI+BASE dofs: {len(dolfin.DirichletBC(mech_problem.state_space.sub(0), dolfin.Constant((0, 0, 0)), biv_geo.ffun, biv_geo.markers['EPI'][0]).get_boundary_values()) + len(dolfin.DirichletBC(mech_problem.state_space.sub(0), dolfin.Constant((0, 0, 0)), biv_geo.ffun, biv_geo.markers['BASE'][0]).get_boundary_values())}")
 
 if WARM_START_T_MS is not None:
     warm_start_name = f"warm_start_{int(WARM_START_T_MS):04d}ms"
     WARM_START = os.path.join(config.outdir, warm_start_name)
     if os.path.exists(WARM_START + ".h5") and os.path.exists(WARM_START + ".json"):
-        mpi_print(f"Loading warm start from t={WARM_START_T_MS:.1f} ms...")
+        logger.info(f"Loading warm start from t={WARM_START_T_MS:.1f} ms...")
         with dolfin.HDF5File(dolfin.MPI.comm_world, WARM_START + ".h5", "r") as f:
             f.read(coupling.ep_solver.vs, "/ep/vs")
             f.read(coupling.mech_solver.state, "/mechanics/state")
@@ -652,14 +650,14 @@ if WARM_START_T_MS is not None:
         lv_pressure_const.assign(lv_state.pressure_n)
         rv_pressure_const.assign(rv_state.pressure_n)
         runner._t0 = t_restart
-        mpi_print(f"Restarting from t={t_restart:.1f} ms")
+        logger.info(f"Restarting from t={t_restart:.1f} ms")
     else:
-        mpi_print(f"WARNING: warm start file not found for t={WARM_START_T_MS:.1f} ms")
+        logger.info(f"WARNING: warm start file not found for t={WARM_START_T_MS:.1f} ms")
 
 try:
     runner.solve(T=config.T, save_freq=config.save_freq, show_progress_bar=False)
 except Exception as e:
-    mpi_print(f"Runner error: {e}")
+    logger.info(f"Runner error: {e}")
 finally:
     runner.close_files()
-    mpi_print("Done.")
+    logger.info("Done.")
