@@ -135,20 +135,14 @@ def create_biv_boundary_conditions(
     traction_lv=None,
     traction_rv=None,
     spring=None,
+    base_displacement=None,  # dolfin.Constant((dx, dy, dz)) or None
 ):
     import dolfin as _d
     if _d.MPI.rank(_d.MPI.comm_world) == 0:
-        print("[BC] BASE free, EPI spring, no pressure", flush=True)
+        print(f"[BC] BASE {'prescribed displacement (temporary)' if base_displacement is not None else 'free'}, "
+              f"EPI spring, no pressure", flush=True)
 
     neumann_bc = []
-    # if traction_lv is not None:
-    #     neumann_bc.append(pulse.NeumannBC(
-    #         traction=utils.float_to_constant(traction_lv),
-    #         marker=geo.markers["ENDO_LV"][0]))
-    # if traction_rv is not None:
-    #     neumann_bc.append(pulse.NeumannBC(
-    #         traction=utils.float_to_constant(traction_rv),
-    #         marker=geo.markers["ENDO_RV"][0]))
     if traction_lv is not None:
         neumann_bc.append(pulse.NeumannBC(
             traction=utils.float_to_constant(0.0),
@@ -158,39 +152,25 @@ def create_biv_boundary_conditions(
             traction=utils.float_to_constant(0.0),
             marker=geo.markers["ENDO_RV"][0]))
 
-    # def dirichlet_bc(W):
-    #     return [dolfin.DirichletBC(
-    #         W.sub(0),
-    #         dolfin.Constant((0.0, 0.0, 0.0)),
-    #         geo.ffun,
-    #         geo.markers["EPI"][0]), dolfin.DirichletBC(
-    #         W.sub(0),
-    #         dolfin.Constant((0.0, 0.0, 0.0)),
-    #         geo.ffun,
-    #         geo.markers["BASE"][0]),]
-
-    # def dirichlet_bc(W):
-    #     return [
-    #         dolfin.DirichletBC(W.sub(0), dolfin.Constant((0, 0, 0)), geo.ffun, geo.markers["EPI"][0]),
-            # dolfin.DirichletBC(W.sub(0), dolfin.Constant((0, 0, 0)), geo.ffun, geo.markers["BASE"][0]),
-        # ]
-
+    dirichlet_bc = ()
+    if base_displacement is not None:
+        def dirichlet_bc_fn(W):
+            return [dolfin.DirichletBC(
+                W.sub(0),
+                base_displacement,
+                geo.ffun,
+                geo.markers["BASE"][0],
+            )]
+        dirichlet_bc = (dirichlet_bc_fn,)
 
     robin_bc = []
     if spring is not None:
-        # Pericardium
-        robin_bc = [
-            pulse.RobinBC(
-                value=utils.float_to_constant(spring),
-                marker=geo.markers["EPI"][0],
-            )]
-            # pulse.RobinBC(
-            #     value=utils.float_to_constant(spring),
-            #     marker=geo.markers["BASE"][0],
-            # )]
+        robin_bc = [pulse.RobinBC(
+            value=utils.float_to_constant(spring),
+            marker=geo.markers["EPI"][0])]
 
     return pulse.BoundaryConditions(
-        dirichlet=(),
+        dirichlet=dirichlet_bc,
         neumann=neumann_bc,
         robin=(robin_bc),
     )

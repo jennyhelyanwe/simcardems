@@ -266,7 +266,7 @@ class MechanicsNewtonSolver_ODE(MechanicsNewtonSolver):
 
         if any_bad:
             # ALL ranks must enter together, regardless of local_bad
-            dump_dir = os.environ.get("DETF_DUMP_DIR", "detf_dumps")
+            dump_dir = os.environ.get("DETF_DUMP_DIR", "results/detf_dumps")
             if rank == 0:
                 os.makedirs(dump_dir, exist_ok=True)
             dolfin.MPI.barrier(comm)

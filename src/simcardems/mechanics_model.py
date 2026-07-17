@@ -44,6 +44,8 @@ def setup_solver(
     use_custom_newton_solver: bool = config.Config.mechanics_use_custom_newton_solver,
     state_prev=None,
     material_parameters: typing.Optional[dict] = None,
+    base_displacement: typing.Optional[dict] = None,
+    valve_stiffness_scale: float = 50.0,
 ):
     """Setup mechanics model with dirichlet boundary conditions or rigid motion."""
 
@@ -99,6 +101,8 @@ def setup_solver(
         linear_solver=linear_solver,
         use_custom_newton_solver=use_custom_newton_solver,
         debug_mode=debug_mode,
+        base_displacement=base_displacement,
+        valve_stiffness_scale=valve_stiffness_scale,
     )
 
     if state_prev is not None:
@@ -117,6 +121,7 @@ def setup_solver(
 class ContinuationBasedMechanicsProblem(pulse.MechanicsProblem):
     def __init__(self, *args, **kwargs):
         self._use_custom_newton_solver = kwargs.pop("use_custom_newton_solver", False)
+        self.valve_stiffness_scale = kwargs.pop("valve_stiffness_scale", 50.0)
         super().__init__(*args, **kwargs)
         self.old_states = []
         self.old_controls = []
@@ -201,9 +206,8 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
 
         valve_mask = getattr(self.geometry, 'valve_mask', None)
         if valve_mask is not None:
-            # Stiff Neo-Hookean for valve plug elements
-            # stiffness_scale = valve_mask * dolfin.Constant(50.0) + (1.0 - valve_mask) * dolfin.Constant(1.0)
-            stiffness_scale = dolfin.Constant(1.0)
+            scale_val = getattr(self, 'valve_stiffness_scale', 50.0)
+            stiffness_scale = valve_mask * dolfin.Constant(scale_val) + (1.0 - valve_mask) * dolfin.Constant(1.0)
             internal_energy = (
                     stiffness_scale * self.material.strain_energy(self._F)
                     + self.material.compressibility(p, self._J)
@@ -434,6 +438,7 @@ def resolve_boundary_conditions(
     traction: typing.Union[dolfin.Constant, float] = None,
     spring: typing.Union[dolfin.Constant, float] = None,
     fix_right_plane: bool = config.Config.fix_right_plane,
+    base_displacement: typing.Union[dolfin.Constant, float] = None,
 ) -> pulse.BoundaryConditions:
     if isinstance(geo, slabgeometry.SlabGeometry):
         return boundary_conditions.create_slab_boundary_conditions(
@@ -460,6 +465,7 @@ def resolve_boundary_conditions(
             traction_lv=initial_pressure,
             traction_rv=initial_pressure,
             spring=spring,
+            base_displacement=base_displacement
         )
     else:
         raise NotImplementedError
@@ -476,6 +482,8 @@ def create_problem(
     linear_solver="gmres",
     use_custom_newton_solver: bool = config.Config.mechanics_use_custom_newton_solver,
     debug_mode=config.Config.debug_mode,
+    base_displacement: typing.Union[dolfin.Constant, float] = None,
+    valve_stiffness_scale: float = 50.0,
 ) -> MechanicsProblem:
     Problem = MechanicsProblem
     if bnd_rigid:
@@ -488,6 +496,7 @@ def create_problem(
             traction=traction,
             spring=spring,
             fix_right_plane=fix_right_plane,
+            base_displacement=base_displacement
         )
 
     verbose = logger.getEffectiveLevel() < logging.INFO
@@ -510,4 +519,5 @@ def create_problem(
             "error_on_nonconvergence": False,
         },
         use_custom_newton_solver=use_custom_newton_solver,
+        valve_stiffness_scale=valve_stiffness_scale,
     )

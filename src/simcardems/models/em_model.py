@@ -34,7 +34,9 @@ def setup_EM_model(
     activation_times=None,
     celltype_function: typing.Optional[dolfin.Function] = None,
     iks_scale_function: typing.Optional[dolfin.Function] = None,
-    material_parameters: typing.Optional[dict] = None
+    material_parameters: typing.Optional[dict] = None,
+    base_displacement: typing.Optional[dict] = None,
+    valve_stiffness_scale: float = 50.0,
 ) -> BaseEMCoupling:
     if config is None:
         config = Config()
@@ -81,6 +83,8 @@ def setup_EM_model(
         debug_mode=config.debug_mode,
         ActiveModel=cls_ActiveModel,
         material_parameters=material_parameters,
+        base_displacement=base_displacement,
+        valve_stiffness_scale = valve_stiffness_scale,
     )
     if mech_state_init is not None:
         mech_heart.state.assign(mech_state_init)
@@ -97,7 +101,9 @@ def setup_EM_model_from_config(
     activation_times=None,
     celltype_function = None,
     iks_scale_function = None,
-    material_parameters: typing.Optional[dict] = None
+    material_parameters: typing.Optional[dict] = None,
+    base_displacement: typing.Optional[dict] = None,
+    valve_stiffness_scale: float = 50.0,
 ) -> BaseEMCoupling:
     if geometry is None:
         geometry = _geometry.load_geometry(
@@ -126,7 +132,9 @@ def setup_EM_model_from_config(
         activation_times=activation_times,
         celltype_function=celltype_function,
         iks_scale_function = iks_scale_function,
-        material_parameters = material_parameters
+        material_parameters = material_parameters,
+        base_displacement = base_displacement,
+        valve_stiffness_scale=valve_stiffness_scale,
     )
 
 
