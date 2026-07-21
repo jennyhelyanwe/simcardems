@@ -435,8 +435,8 @@ def convert(h5file, outdir, tv_file=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--results', default='biv_coarse_run_output/results.h5')
-    parser.add_argument('--out', default='ensight')
+    parser.add_argument('--results', default='results/biv_coarse_run_output/results.h5')
+    parser.add_argument('--out', default='results/ensight')
     parser.add_argument('--tv', default='rodero_05_coarse_tv.npy', help='Path to coarse_tv.npy material labels')
     args = parser.parse_args()
     convert(args.results, args.out, args.tv)

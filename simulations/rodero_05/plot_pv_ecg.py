@@ -4,8 +4,8 @@ import matplotlib.gridspec as gridspec
 import time
 import os
 
-PV_FILE  = 'biv_coarse_run_output/pv_loop.csv'
-ECG_FILE = 'biv_coarse_run_output/pseudo_ecg.csv'
+PV_FILE  = 'results/biv_coarse_run_output/pv_loop.csv'
+ECG_FILE = 'results/biv_coarse_run_output/pseudo_ecg.csv'
 POLL_INTERVAL = 2.0
 
 PHASE_NAMES = {0: 'Preload', 1: 'IVC', 2: 'Ejection', 3: 'IVR', 4: 'Filling'}
