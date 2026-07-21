@@ -295,7 +295,7 @@ logger.debug(f"Poor quality (ratio < 0.02): {np.sum(radii < 0.02)}")
 
 
 # Build refined EP mesh with parent tracking
-NUM_REFINEMENTS = 0
+NUM_REFINEMENTS = 2
 if NUM_REFINEMENTS > 1:
     ep_mesh = refine_mesh(geo.mesh, num_refinements=NUM_REFINEMENTS)
     ffun_ep = dolfin.adapt(geo.ffun, ep_mesh)
