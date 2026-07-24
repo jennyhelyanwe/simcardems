@@ -295,7 +295,7 @@ logger.debug(f"Poor quality (ratio < 0.02): {np.sum(radii < 0.02)}")
 
 
 # Build refined EP mesh with parent tracking
-NUM_REFINEMENTS = 2
+NUM_REFINEMENTS = 0
 if NUM_REFINEMENTS > 1:
     ep_mesh = refine_mesh(geo.mesh, num_refinements=NUM_REFINEMENTS)
     ffun_ep = dolfin.adapt(geo.ffun, ep_mesh)
@@ -386,14 +386,14 @@ config.dt_mech = 2.5
 config.geometry_path = MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5"
 config.outdir = RESULTS_DIR + "biv_coarse_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
-config.save_freq = 20
+config.save_freq = 2
 config.linear_mechanics_solver = "mumps"
-config.spring = 100.0
-config.traction = 0.001
+config.spring = 50.0
+config.traction = 0.005
 config.mechanics_use_custom_newton_solver = True
 config.mechanics_solve_strategy = "hybrid"
 config.mech_threshold = 1.0
-config.relaxation_factor = 0.3
+config.relaxation_factor = 1.0
 # Scalability test
 SCALABILITY_TEST = os.environ.get("SCALABILITY_TEST", "0") == "1"
 if SCALABILITY_TEST:
@@ -449,7 +449,7 @@ iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
 
 # ── 6. EM coupling ─────────────────────────────────────────────────────────────
 # ── Parameter summary: print everything that affects the solve, up front ──
-VALVE_STIFFNESS_SCALE = 5.0
+VALVE_STIFFNESS_SCALE = 1.0 # 5.0
 logger.info("" + "=" * 60)
 logger.info("RUN PARAMETERS")
 logger.info("=" * 60)

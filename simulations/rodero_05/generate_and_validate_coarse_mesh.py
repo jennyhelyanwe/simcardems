@@ -16,7 +16,8 @@ Steps below:
     2. mmg3d quality/size optimisation, resolution verification
     3. Nearest-neighbour boundary marker transfer from fine mesh
     4. Build dolfin mesh, assign ffun
-    5. Save mesh + ffun + markers to h5
+    4b. Boundary marker visual check + isolated-facet detection/auto-fix
+    5. Save mesh + ffun + markers to h5 (with any 4b fixes applied)
     6. Nearest-vertex fibre interpolation from fine mesh + Gram-Schmidt orthonormalisation
     7. Fibre orthonormality check
     8. Mesh quality check (volumes, inradius/circumradius)
@@ -57,7 +58,10 @@ RESOLUTION_TOLERANCE = 0.15   # fraction, for mean edge length check
 QUALITY_THRESHOLD = 0.1       # inradius/circumradius ratio below this = poor
 STRAIN_ENERGY_TOLERANCE = 1.0  # kPa*mm^3, absolute tolerance for "should be ~0"
 
+marker_names = {10: "BASE", 20: "ENDO_RV", 30: "ENDO_LV", 40: "EPI"}
+
 summary = {}  # collects PASS/WARN/FAIL per check, printed at the end
+
 # ══════════════════════════════════════════════════════════════════════════
 # Step 1 and 2: Tetrahedralise and mmg3d optimisation, iterate until desired edge length reached.
 # ══════════════════════════════════════════════════════════════════════════
@@ -120,7 +124,6 @@ def run_mmg3d(hmax_val, hmin_val):
 
 def iqr_within_tolerance(lengths, target, tol):
     q25, q50, q75 = np.percentile(lengths, [25, 50, 75])
-    # both quartile bounds must sit within tol of the target
     return (abs(q25 - target) / target <= tol) and (abs(q75 - target) / target <= tol), q25, q50, q75
 
 
@@ -138,8 +141,6 @@ for attempt in range(1, max_iters + 1):
         print(f"  Converged: IQR [{q25:.2f}, {q75:.2f}]mm within {IQR_TOLERANCE*100:.0f}% "
               f"of target after {attempt} attempt(s).")
         break
-    # Scale hmax toward the median as the correction driver, since it's the
-    # single most representative point of the bulk distribution
     correction = target_size_mm / q50
     hmax = hmax * correction
     hmin = target_size_mm * 0.4 * (hmax / (target_size_mm * 1.3))
@@ -148,7 +149,6 @@ else:
 
 coarse_pv.save(MESH_DIR + "rodero_05_coarse_" + resolution + ".vtu")
 
-# ── Histogram + percentile breakdown ─────────────────────────────────────
 print(f"\n  === Resolution check (IQR-based) ===")
 percentiles = [5, 25, 50, 75, 95]
 pvals = np.percentile(lengths, percentiles)
@@ -266,11 +266,162 @@ print(f"  Dolfin marker counts: "
       f"{ {m: int(np.sum(ffun.array() == m)) for m in np.unique(ffun.array())} }")
 print(f"  Mesh: {dolfin_mesh.num_vertices()} vertices, {dolfin_mesh.num_cells()} cells")
 
+coarse_coords = dolfin_mesh.coordinates()
+coarse_cells_arr = dolfin_mesh.cells()
+ffun_arr = ffun.array()
+
 # ══════════════════════════════════════════════════════════════════════════
-# Step 5: Save mesh + ffun + markers to h5
+# Step 4b: Boundary marker visual check + isolated-facet detection/auto-fix
 # ══════════════════════════════════════════════════════════════════════════
 
-print("Step 5: Saving mesh to meshes/rodero_05_coarse_" + resolution + ".h5...")
+print("\nStep 4b: Boundary marker visualisation + isolated-facet check...")
+
+mesh_for_facets = dolfin_mesh
+mesh_for_facets.init(2, 0)
+mesh_for_facets.init(2, 3)
+mesh_for_facets.init(2, 1)
+mesh_for_facets.init(1, 2)
+n_facets_viz = mesh_for_facets.num_entities(2)
+conn_20_viz = mesh_for_facets.topology()(2, 0)
+conn_23_viz = mesh_for_facets.topology()(2, 3)
+conn_21 = mesh_for_facets.topology()(2, 1)
+conn_12 = mesh_for_facets.topology()(1, 2)
+
+facet_verts_viz = np.array([conn_20_viz(i) for i in range(n_facets_viz)])
+exterior_mask_viz = np.array([len(conn_23_viz(i)) == 1 for i in range(n_facets_viz)])
+boundary_mask_viz = exterior_mask_viz & np.isin(ffun_arr, [10, 20, 30, 40])
+boundary_facet_indices = np.where(boundary_mask_viz)[0]
+facet_set = set(boundary_facet_indices.tolist())
+
+
+def build_boundary_surf(ffun_arr):
+    b_verts = facet_verts_viz[boundary_mask_viz]
+    b_markers = ffun_arr[boundary_mask_viz]
+    faces = np.hstack([np.full((len(b_verts), 1), 3), b_verts]).astype(np.int64).flatten()
+    surf = pv.PolyData(coarse_coords, faces)
+    surf.cell_data["marker"] = b_markers
+    return surf
+
+
+def show_marker_views(surf, label):
+    plotter = pv.Plotter(window_size=(1400, 1400))
+    plotter.add_mesh(surf, scalars="marker", cmap="tab10", categories=True,
+                      show_edges=False, scalar_bar_args={"title": "boundary marker"})
+    plotter.add_axes()
+    plotter.add_text(label, font_size=14)
+    plotter.camera_position = 'iso'
+    plotter.show()
+
+    for marker_id, name in marker_names.items():
+        mask_single = exterior_mask_viz & (ffun_arr == marker_id)
+        if mask_single.sum() == 0:
+            print(f"  {name}: no facets found, skipping visual")
+            continue
+        verts_single = facet_verts_viz[mask_single]
+        faces_single = np.hstack([np.full((len(verts_single), 1), 3), verts_single]).astype(np.int64).flatten()
+        surf_single = pv.PolyData(coarse_coords, faces_single)
+
+        plotter = pv.Plotter(window_size=(1200, 1200))
+        plotter.add_mesh(surf, style="wireframe", color="lightgray", opacity=0.1)
+        plotter.add_mesh(surf_single, color="red", show_edges=True)
+        plotter.add_text(f"{label}: {name} (marker={marker_id}, {mask_single.sum()} facets)", font_size=14)
+        plotter.camera_position = 'iso'
+        plotter.show()
+
+
+def find_small_marker_clusters(ffun_arr, boundary_facet_indices, exterior_mask, conn_21, conn_12, size_threshold=5):
+    """Flood-fill same-marker boundary facets into connected components.
+    Any component smaller than size_threshold is flagged as a likely mislabel -
+    catches multi-facet islands, not just single isolated facets."""
+    visited = set()
+    small_clusters = []
+
+    for fidx in boundary_facet_indices:
+        if fidx in visited:
+            continue
+        my_marker = ffun_arr[fidx]
+        # BFS/flood-fill over same-marker, edge-connected facets
+        cluster = []
+        stack = [fidx]
+        visited.add(fidx)
+        while stack:
+            current = stack.pop()
+            cluster.append(current)
+            for eidx in conn_21(current):
+                for neighbor_fidx in conn_12(eidx):
+                    if neighbor_fidx == current or neighbor_fidx not in facet_set:
+                        continue
+                    if neighbor_fidx in visited:
+                        continue
+                    if ffun_arr[neighbor_fidx] == my_marker:
+                        visited.add(neighbor_fidx)
+                        stack.append(neighbor_fidx)
+
+        if len(cluster) < size_threshold:
+            small_clusters.append((cluster, my_marker))
+
+    return small_clusters
+
+
+# ── Pass 1: show BEFORE any fix, so you can see the raw output ────────────
+print("  Showing markers BEFORE isolated-facet fix...")
+show_marker_views(build_boundary_surf(ffun_arr), "BEFORE fix")
+
+# ── Detect and auto-fix isolated facets ────────────────────────────────────
+print("  Checking for small marker clusters (likely mislabeled islands)...")
+small_clusters = find_small_marker_clusters(
+    ffun_arr, boundary_facet_indices, exterior_mask_viz, conn_21, conn_12, size_threshold=5
+)
+
+if len(small_clusters) > 0:
+    print(f"  *** WARNING: {len(small_clusters)} small marker cluster(s) found: ***")
+    for cluster, marker in small_clusters:
+        centroid = coarse_coords[facet_verts_viz[cluster]].mean(axis=(0, 1))
+        print(f"    {len(cluster)} facet(s), marker={marker} ({marker_names.get(marker,'?')}), "
+              f"centroid={centroid}")
+
+    for cluster, old_marker in small_clusters:
+        # Gather markers of all facets adjacent to the cluster boundary (excluding the cluster itself)
+        neighbor_markers = []
+        cluster_set = set(cluster)
+        for fidx in cluster:
+            for eidx in conn_21(fidx):
+                for neighbor_fidx in conn_12(eidx):
+                    if neighbor_fidx in cluster_set or neighbor_fidx not in facet_set:
+                        continue
+                    if exterior_mask_viz[neighbor_fidx]:
+                        neighbor_markers.append(ffun_arr[neighbor_fidx])
+
+        if len(neighbor_markers) == 0:
+            print(f"    cluster of {len(cluster)} facets: no external neighbours found, skipping")
+            continue
+
+        vals, counts = np.unique(neighbor_markers, return_counts=True)
+        new_marker = vals[np.argmax(counts)]
+        for fidx in cluster:
+            ffun_arr[fidx] = new_marker
+            ffun[fidx] = int(new_marker)
+        print(f"    cluster of {len(cluster)} facets: {old_marker} -> {new_marker}")
+
+    small_clusters_recheck = find_small_marker_clusters(
+        ffun_arr, boundary_facet_indices, exterior_mask_viz, conn_21, conn_12, size_threshold=5
+    )
+    print(f"  Re-check: {len(small_clusters_recheck)} small cluster(s) remaining.")
+    summary["marker_isolation_check"] = "PASS" if len(small_clusters_recheck) == 0 else \
+        f"WARN ({len(small_clusters_recheck)} small cluster(s) still remaining after auto-fix attempt)"
+
+    # ── Pass 2: show AFTER the fix, so you can confirm it worked ──────────
+    print("  Showing markers AFTER isolated-facet fix...")
+    show_marker_views(build_boundary_surf(ffun_arr), "AFTER fix")
+else:
+    print("  OK: no small marker clusters found.")
+    summary["marker_isolation_check"] = "PASS"
+
+# ══════════════════════════════════════════════════════════════════════════
+# Step 5: Save mesh + ffun + markers to h5 (with any 4b fixes applied)
+# ══════════════════════════════════════════════════════════════════════════
+
+print("\nStep 5: Saving mesh to meshes/rodero_05_coarse_" + resolution + ".h5...")
 
 h5_path = MESH_DIR + "rodero_05_coarse_" + resolution + ".h5"
 
@@ -335,8 +486,6 @@ print(f"  Fine mesh zero f0: {np.sum(np.linalg.norm(f0_vals, axis=1) < 1e-10)} /
 fine_cell_centres = fine_mesh.coordinates()[fine_topo].mean(axis=1)
 tree_fine_cells = cKDTree(fine_cell_centres)
 
-coarse_coords = dolfin_mesh.coordinates()
-coarse_cells_arr = dolfin_mesh.cells()
 coarse_cell_centres = coarse_coords[coarse_cells_arr].mean(axis=1)
 _, idx = tree_fine_cells.query(coarse_cell_centres)
 
@@ -398,6 +547,35 @@ with dolfin.HDF5File(dolfin_mesh.mpi_comm(), h5_path, "a") as f:
     f.write(s0_coarse, "microstructure/s0")
     f.write(n0_coarse, "microstructure/n0")
 print("  Fibres saved.")
+
+# ══════════════════════════════════════════════════════════════════════════
+# Step 6b: Interactive fibre visualisation (sparse glyphs, f0/s0/n0)
+# ══════════════════════════════════════════════════════════════════════════
+
+print("\nStep 6b: Fibre visualisation...")
+
+vtk_cells_fib = np.hstack([np.full((coarse_cells_arr.shape[0], 1), 4), coarse_cells_arr]).astype(np.int64).flatten()
+vol_grid_fib = pv.UnstructuredGrid(vtk_cells_fib, np.full(coarse_cells_arr.shape[0], pv.CellType.TETRA), coarse_coords)
+
+every_nth = max(1, len(coarse_cell_centres) // 1000)  # aim for ~500 glyphs regardless of mesh size
+idx_sparse = np.arange(0, len(coarse_cell_centres), every_nth)
+pts_sparse = pv.PolyData(coarse_cell_centres[idx_sparse])
+print(f"  Plotting {len(idx_sparse)} / {len(coarse_cell_centres)} cells (every {every_nth}th)")
+
+glyph_scale = q50_final * 0.7 if 'q50_final' in dir() else target_size_mm * 0.7
+
+
+# ── Separate view per field ─────────────────────────────────────────────────
+for name, arr, color in [("f0", f0_gs, "red"), ("s0", s0_gs, "green"), ("n0", n0_gs, "blue")]:
+    plotter = pv.Plotter(window_size=(1200, 1200))
+    plotter.add_mesh(vol_grid_fib, style="wireframe", color="lightgray", opacity=0.08)
+    pdata = pts_sparse.copy()
+    pdata["vec"] = arr[idx_sparse]
+    glyphs = pdata.glyph(orient="vec", scale=False, factor=glyph_scale)
+    plotter.add_mesh(glyphs, color=color)
+    plotter.add_text(f"{name} (every {every_nth}th cell)", font_size=14)
+    plotter.camera_position = 'iso'
+    plotter.show()
 
 # ══════════════════════════════════════════════════════════════════════════
 # Step 7: Fibre orthonormality check (read back from h5, independent check)
@@ -511,8 +689,6 @@ print(f"  {'OK' if quality_ok else '*** WARN ***'}")
 
 print("\nStep 9: Boundary marker facet counts...")
 
-ffun_arr = ffun.array()
-marker_names = {10: "BASE", 20: "ENDO_RV", 30: "ENDO_LV", 40: "EPI"}
 marker_counts = {}
 for marker, name in marker_names.items():
     count = int(np.sum(ffun_arr == marker))
@@ -520,8 +696,6 @@ for marker, name in marker_names.items():
     print(f"  {name} ({marker}): {count} facets")
 print(f"  Total facets: {len(ffun_arr)}")
 
-# Rough sanity: EPI should be the largest (whole outer surface), BASE should
-# be meaningfully smaller (a thin ring), not comparable in size to EPI.
 markers_ok = marker_counts["EPI"] > marker_counts["BASE"] and all(v > 0 for v in marker_counts.values())
 summary["boundary_markers"] = "PASS" if markers_ok else f"WARN ({marker_counts})"
 print(f"  {'OK' if markers_ok else '*** WARN: check EPI/BASE ratio and zero counts ***'}")
@@ -561,7 +735,7 @@ print(f"  Valve plug elements (7-10): {n_valve} / {len(coarse_tv)} ({100*n_valve
 np.save(MESH_DIR + '/rodero_05_coarse_' + resolution + '_tv.npy', coarse_tv)
 print(f"  Saved meshes/rodero_05_coarse_{resolution}_tv.npy")
 
-valve_ok = 0 < n_valve < 0.5 * len(coarse_tv)  # sanity: some but not most of the mesh
+valve_ok = 0 < n_valve < 0.5 * len(coarse_tv)
 summary["valve_mapping"] = "PASS" if valve_ok else f"WARN ({n_valve}/{len(coarse_tv)} valve elements)"
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -589,8 +763,6 @@ if a_fs > 1e-12 and b_fs > 1e-12:
 else:
     W8fs_per_cell = 0.5 * a_fs * I8fs_at_rest ** 2
 
-# W1, W4f, W4s are exactly 0 at F=I given unit-norm fibres (I1=3, I4f=I4s=1
-# exactly cancels each term's "-1" offset) - only integrate W8fs.
 total_energy_at_rest = float(np.sum(W8fs_per_cell * volumes))
 
 print(f"  I8fs range at rest: {I8fs_at_rest.min():.6e} to {I8fs_at_rest.max():.6e}")

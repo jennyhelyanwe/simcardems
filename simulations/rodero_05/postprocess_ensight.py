@@ -361,6 +361,7 @@ def convert(h5file, outdir, tv_file=None):
         write_vector_node_file(out_path, u_vals, var_name)
     vector_vars.append((var_name, pattern))
 
+
     # ── Scalar mechanics fields (mechanics mesh only) ─────────────────────────
     for field_name in mech_fields:
         var_name = f'mech_{field_name}'
