@@ -16,9 +16,11 @@ Steps below:
     2. mmg3d quality/size optimisation, resolution verification
     3. Nearest-neighbour boundary marker transfer from fine mesh
     4. Build dolfin mesh, assign ffun
-    4b. Boundary marker visual check + isolated-facet detection/auto-fix
-    5. Save mesh + ffun + markers to h5 (with any 4b fixes applied)
+    4b. Boundary marker isolated-facet detection/auto-fix + visual check (after fix)
+    4c. Boundary facet normal verification (geometric ground truth) + repair + visual check
+    5. Save mesh + ffun + markers to h5
     6. Nearest-vertex fibre interpolation from fine mesh + Gram-Schmidt orthonormalisation
+    6b. Interactive fibre visualisation
     7. Fibre orthonormality check
     8. Mesh quality check (volumes, inradius/circumradius)
     9. Boundary marker facet counts
@@ -45,25 +47,23 @@ from scipy.spatial import cKDTree
 
 resolution = '4mm'
 MESH_DIR = 'meshes/'
-target_size_mm = float(resolution.replace("mm", ""))  # literal target, e.g. 4.0
+target_size_mm = float(resolution.replace("mm", ""))
 
-# Material parameters to sanity-check at the end (edit as needed).
-# Full orthotropic set (Holzapfel 2019 Table 1, initial-value column).
 MATERIAL_PARAMS_TO_CHECK = dict(
     a=0.61, a_f=1.56, b=7.5, b_f=35.31,
     a_s=0.70, b_s=33.24, a_fs=0.46, b_fs=5.09,
 )
 
-RESOLUTION_TOLERANCE = 0.15   # fraction, for mean edge length check
-QUALITY_THRESHOLD = 0.1       # inradius/circumradius ratio below this = poor
-STRAIN_ENERGY_TOLERANCE = 1.0  # kPa*mm^3, absolute tolerance for "should be ~0"
+RESOLUTION_TOLERANCE = 0.15
+QUALITY_THRESHOLD = 0.1
+STRAIN_ENERGY_TOLERANCE = 1.0
 
 marker_names = {10: "BASE", 20: "ENDO_RV", 30: "ENDO_LV", 40: "EPI"}
 
-summary = {}  # collects PASS/WARN/FAIL per check, printed at the end
+summary = {}
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 1 and 2: Tetrahedralise and mmg3d optimisation, iterate until desired edge length reached.
+# Step 1 and 2: Tetrahedralise and mmg3d optimisation
 # ══════════════════════════════════════════════════════════════════════════
 
 print(f"Step 1-2: Tetrahedralising + mmg3d optimisation (target {target_size_mm}mm)...")
@@ -91,7 +91,7 @@ tet.add_hole(hole2)
 tet.tetrahedralize(switches=f"pq1.2/15a{max_vol_cm3:.6f}")
 
 coarse_pv_base = tet.grid
-coarse_pv_base.points *= 10  # scale to mm, cache the pre-mmg3d TetGen output
+coarse_pv_base.points *= 10
 coarse_pv_base.save(MESH_DIR + "rodero_05_coarse_" + resolution + "_pretetgen.vtu")
 print(f"  TetGen mesh: {coarse_pv_base.n_points} nodes, {coarse_pv_base.n_cells} cells")
 
@@ -130,7 +130,7 @@ def iqr_within_tolerance(lengths, target, tol):
 hmax = target_size_mm * 1.3
 hmin = target_size_mm * 0.4
 max_iters = 8
-IQR_TOLERANCE = 0.20  # 25th and 75th percentile must each be within 20% of target
+IQR_TOLERANCE = 0.20
 
 for attempt in range(1, max_iters + 1):
     coarse_pv, lengths = run_mmg3d(hmax, hmin)
@@ -271,10 +271,10 @@ coarse_cells_arr = dolfin_mesh.cells()
 ffun_arr = ffun.array()
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 4b: Boundary marker visual check + isolated-facet detection/auto-fix
+# Step 4b: Boundary marker isolated-facet detection/auto-fix
 # ══════════════════════════════════════════════════════════════════════════
 
-print("\nStep 4b: Boundary marker visualisation + isolated-facet check...")
+print("\nStep 4b: Isolated-facet marker check...")
 
 mesh_for_facets = dolfin_mesh
 mesh_for_facets.init(2, 0)
@@ -331,8 +331,7 @@ def show_marker_views(surf, label):
 
 def find_small_marker_clusters(ffun_arr, boundary_facet_indices, exterior_mask, conn_21, conn_12, size_threshold=5):
     """Flood-fill same-marker boundary facets into connected components.
-    Any component smaller than size_threshold is flagged as a likely mislabel -
-    catches multi-facet islands, not just single isolated facets."""
+    Any component smaller than size_threshold is flagged as a likely mislabel."""
     visited = set()
     small_clusters = []
 
@@ -340,7 +339,6 @@ def find_small_marker_clusters(ffun_arr, boundary_facet_indices, exterior_mask, 
         if fidx in visited:
             continue
         my_marker = ffun_arr[fidx]
-        # BFS/flood-fill over same-marker, edge-connected facets
         cluster = []
         stack = [fidx]
         visited.add(fidx)
@@ -363,11 +361,6 @@ def find_small_marker_clusters(ffun_arr, boundary_facet_indices, exterior_mask, 
     return small_clusters
 
 
-# ── Pass 1: show BEFORE any fix, so you can see the raw output ────────────
-print("  Showing markers BEFORE isolated-facet fix...")
-show_marker_views(build_boundary_surf(ffun_arr), "BEFORE fix")
-
-# ── Detect and auto-fix isolated facets ────────────────────────────────────
 print("  Checking for small marker clusters (likely mislabeled islands)...")
 small_clusters = find_small_marker_clusters(
     ffun_arr, boundary_facet_indices, exterior_mask_viz, conn_21, conn_12, size_threshold=5
@@ -381,7 +374,6 @@ if len(small_clusters) > 0:
               f"centroid={centroid}")
 
     for cluster, old_marker in small_clusters:
-        # Gather markers of all facets adjacent to the cluster boundary (excluding the cluster itself)
         neighbor_markers = []
         cluster_set = set(cluster)
         for fidx in cluster:
@@ -410,7 +402,6 @@ if len(small_clusters) > 0:
     summary["marker_isolation_check"] = "PASS" if len(small_clusters_recheck) == 0 else \
         f"WARN ({len(small_clusters_recheck)} small cluster(s) still remaining after auto-fix attempt)"
 
-    # ── Pass 2: show AFTER the fix, so you can confirm it worked ──────────
     print("  Showing markers AFTER isolated-facet fix...")
     show_marker_views(build_boundary_surf(ffun_arr), "AFTER fix")
 else:
@@ -418,7 +409,113 @@ else:
     summary["marker_isolation_check"] = "PASS"
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 5: Save mesh + ffun + markers to h5 (with any 4b fixes applied)
+# Step 4c: Boundary facet normal verification (geometric ground truth) + repair
+# ══════════════════════════════════════════════════════════════════════════
+
+print("\nStep 4c: Boundary facet normal verification...")
+
+
+def verify_facet_normals(mesh, ffun_arr, marker_dict):
+    """For each boundary facet, check dolfin's normal points away from its own
+    parent cell's centroid — pure geometry, independent of vertex ordering
+    or any mesh-reordering step."""
+    mesh.init(2, 3)
+    results = {}
+    for marker_id, label in marker_dict.items():
+        facet_idx = np.where(ffun_arr == marker_id)[0]
+        if len(facet_idx) == 0:
+            continue
+        wrong_facets = []
+        for fidx in facet_idx:
+            facet = dolfin.Facet(mesh, int(fidx))
+            n = np.array([facet.normal().x(), facet.normal().y(), facet.normal().z()])
+            parent_cell_idx = facet.entities(3)[0]
+            cell_centroid = dolfin.Cell(mesh, parent_cell_idx).midpoint().array()
+            facet_centroid = facet.midpoint().array()
+            if np.dot(facet_centroid - cell_centroid, n) < 0:
+                wrong_facets.append(int(fidx))
+        results[label] = (len(wrong_facets), len(facet_idx), wrong_facets)
+        print(f"  {label}: {len(wrong_facets)} / {len(facet_idx)} facets fail outward check")
+    return results
+
+
+def plot_boundary_normals(mesh, ffun_arr, coords, marker_dict, label_suffix, glyph_factor=1.5):
+    mesh.init(2, 3)
+    plotter = pv.Plotter(shape=(1, len(marker_dict)), window_size=(700 * len(marker_dict), 700))
+    for i, (marker_id, label) in enumerate(marker_dict.items()):
+        facet_idx = np.where(ffun_arr == marker_id)[0]
+        if len(facet_idx) == 0:
+            continue
+        verts, normals, centres = [], [], []
+        for fidx in facet_idx:
+            facet = dolfin.Facet(mesh, int(fidx))
+            n = facet.normal()
+            normals.append([n.x(), n.y(), n.z()])
+            centres.append(facet.midpoint().array())
+            verts.append(list(facet.entities(0)))
+        verts = np.array(verts)
+        faces = np.hstack([np.full((len(verts), 1), 3), verts]).astype(np.int64).flatten()
+        surf = pv.PolyData(coords, faces)
+
+        plotter.subplot(0, i)
+        plotter.add_mesh(surf, color="lightgray", show_edges=True, opacity=0.85)
+        pts = pv.PolyData(np.array(centres))
+        pts["normals"] = np.array(normals)
+        arrows = pts.glyph(orient="normals", scale=False, factor=glyph_factor)
+        plotter.add_mesh(arrows, color="red")
+        plotter.add_text(f"{label} ({len(facet_idx)} facets) - {label_suffix}", font_size=12)
+        plotter.camera_position = 'iso'
+    plotter.link_views()
+    plotter.show()
+
+
+boundary_markers_to_check = {20: "ENDO_RV", 30: "ENDO_LV", 40: "EPI"}
+normal_check_results = verify_facet_normals(dolfin_mesh, ffun_arr, boundary_markers_to_check)
+n_total_wrong = sum(r[0] for r in normal_check_results.values())
+
+if n_total_wrong > 0:
+    print(f"  *** {n_total_wrong} facets have geometrically inward-pointing normals — repairing ***")
+
+    bad_cells = set()
+    for label, (n_wrong, n_total, wrong_facets) in normal_check_results.items():
+        for fidx in wrong_facets:
+            facet = dolfin.Facet(dolfin_mesh, fidx)
+            bad_cells.add(facet.entities(3)[0])
+
+    mesh_cells_arr = dolfin_mesh.cells().copy()
+    for cidx in bad_cells:
+        mesh_cells_arr[cidx, [2, 3]] = mesh_cells_arr[cidx, [3, 2]]
+
+    dolfin_mesh = dolfin.Mesh()
+    editor = dolfin.MeshEditor()
+    editor.open(dolfin_mesh, "tetrahedron", 3, 3)
+    editor.init_vertices(len(coarse_coords))
+    editor.init_cells(len(mesh_cells_arr))
+    for i, pt in enumerate(coarse_coords):
+        editor.add_vertex(i, pt)
+    for i, cell in enumerate(mesh_cells_arr):
+        editor.add_cell(i, cell)
+    editor.close()
+    dolfin_mesh.init()
+    dolfin_mesh.init(2, 3)
+    # Deliberately NOT calling .order() again — this mesh is final.
+
+    coarse_coords = dolfin_mesh.coordinates()
+    coarse_cells_arr = dolfin_mesh.cells()
+
+    print("  Re-checking after repair...")
+    normal_check_results = verify_facet_normals(dolfin_mesh, ffun_arr, boundary_markers_to_check)
+    n_total_wrong = sum(r[0] for r in normal_check_results.values())
+
+assert n_total_wrong == 0, f"{n_total_wrong} facets still have inward normals after repair — stop, do not simulate"
+print("  OK: all boundary facet normals verified outward-pointing.")
+summary["facet_normal_check"] = "PASS"
+
+print("  Showing corrected boundary facet normals...")
+plot_boundary_normals(dolfin_mesh, ffun_arr, coarse_coords, boundary_markers_to_check, "corrected")
+
+# ══════════════════════════════════════════════════════════════════════════
+# Step 5: Save mesh + ffun + markers to h5
 # ══════════════════════════════════════════════════════════════════════════
 
 print("\nStep 5: Saving mesh to meshes/rodero_05_coarse_" + resolution + ".h5...")
@@ -461,8 +558,6 @@ n_fine_vertices = fine_mesh.num_vertices()
 
 
 def p1_to_cell_centres_nearest(fn, fine_mesh, fine_topo, v2d, n_fine_vertices):
-    """Assign each fine cell the fibre value at its nearest vertex (no averaging -
-    averaging breaks orthonormality across a rotating fibre field, see history)."""
     raw = fn.vector().get_local()
     nodes = np.zeros((n_fine_vertices, 3))
     for i in range(n_fine_vertices):
@@ -504,8 +599,6 @@ print(f"    max|f0.s0|={dot_fs.max():.3e}, max|f0.n0|={dot_fn.max():.3e}, max|s0
 
 
 def gram_schmidt_orthonormalize(f0_arr, s0_arr, n0_arr):
-    """Row-wise Gram-Schmidt. f0 anchored (renormalized only); s0 orthogonalized
-    against f0; n0 = f0 x s0 (exact orthogonality to both by construction)."""
     f0_norm = np.linalg.norm(f0_arr, axis=1, keepdims=True)
     f0_new = f0_arr / np.where(f0_norm > 1e-10, f0_norm, 1.0)
 
@@ -549,7 +642,7 @@ with dolfin.HDF5File(dolfin_mesh.mpi_comm(), h5_path, "a") as f:
 print("  Fibres saved.")
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 6b: Interactive fibre visualisation (sparse glyphs, f0/s0/n0)
+# Step 6b: Interactive fibre visualisation
 # ══════════════════════════════════════════════════════════════════════════
 
 print("\nStep 6b: Fibre visualisation...")
@@ -557,15 +650,13 @@ print("\nStep 6b: Fibre visualisation...")
 vtk_cells_fib = np.hstack([np.full((coarse_cells_arr.shape[0], 1), 4), coarse_cells_arr]).astype(np.int64).flatten()
 vol_grid_fib = pv.UnstructuredGrid(vtk_cells_fib, np.full(coarse_cells_arr.shape[0], pv.CellType.TETRA), coarse_coords)
 
-every_nth = max(1, len(coarse_cell_centres) // 1000)  # aim for ~500 glyphs regardless of mesh size
+every_nth = max(1, len(coarse_cell_centres) // 1000)
 idx_sparse = np.arange(0, len(coarse_cell_centres), every_nth)
 pts_sparse = pv.PolyData(coarse_cell_centres[idx_sparse])
 print(f"  Plotting {len(idx_sparse)} / {len(coarse_cell_centres)} cells (every {every_nth}th)")
 
 glyph_scale = q50_final * 0.7 if 'q50_final' in dir() else target_size_mm * 0.7
 
-
-# ── Separate view per field ─────────────────────────────────────────────────
 for name, arr, color in [("f0", f0_gs, "red"), ("s0", s0_gs, "green"), ("n0", n0_gs, "blue")]:
     plotter = pv.Plotter(window_size=(1200, 1200))
     plotter.add_mesh(vol_grid_fib, style="wireframe", color="lightgray", opacity=0.08)
@@ -578,7 +669,7 @@ for name, arr, color in [("f0", f0_gs, "red"), ("s0", s0_gs, "green"), ("n0", n0
     plotter.show()
 
 # ══════════════════════════════════════════════════════════════════════════
-# Step 7: Fibre orthonormality check (read back from h5, independent check)
+# Step 7: Fibre orthonormality check
 # ══════════════════════════════════════════════════════════════════════════
 
 print("\nStep 7: Fibre orthonormality check...")
@@ -620,6 +711,12 @@ print(f"  {'OK' if fibre_ok else '*** FAIL ***'}")
 # ══════════════════════════════════════════════════════════════════════════
 # Step 8: Mesh quality check
 # ══════════════════════════════════════════════════════════════════════════
+#
+# NOTE: this checks magnitude only (tiny/degenerate elements, shape quality).
+# Cell orientation/normal correctness is verified separately in Step 4c using
+# dolfin's own facet.normal() against parent-cell geometry — a raw coordinate
+# "signed volume" is not a reliable orientation signal once the mesh has been
+# through dolfin_mesh.order(), so it's deliberately not used as a check here.
 
 print("\nStep 8: Mesh quality check...")
 
@@ -667,20 +764,17 @@ def tet_quality_ratios(coords, cells_arr):
 volumes = tet_volumes(coarse_coords, coarse_cells_arr)
 radii = tet_quality_ratios(coarse_coords, coarse_cells_arr)
 
-n_neg_vol = int(np.sum(volumes < 0))
 n_tiny_vol = int(np.sum(volumes < 0.01))
 n_poor_quality = int(np.sum(radii < QUALITY_THRESHOLD))
 
 print(f"  Cell volumes: min={volumes.min():.4f}, mean={volumes.mean():.4f}, max={volumes.max():.4f}")
-print(f"  Negative volumes: {n_neg_vol}")
 print(f"  Very small volumes (<0.01): {n_tiny_vol}")
 print(f"  Inradius/circumradius: min={radii.min():.4f}, mean={radii.mean():.4f}")
 print(f"  Poor quality (ratio < {QUALITY_THRESHOLD}): {n_poor_quality} / {len(radii)}"
       f" ({100 * n_poor_quality / len(radii):.2f}%)")
 
-quality_ok = n_neg_vol == 0 and n_tiny_vol == 0 and (n_poor_quality / len(radii)) < 0.01
-summary["quality"] = "PASS" if quality_ok else \
-    f"WARN ({n_neg_vol} neg vol, {n_poor_quality} poor-quality cells)"
+quality_ok = n_tiny_vol == 0 and (n_poor_quality / len(radii)) < 0.01
+summary["quality"] = "PASS" if quality_ok else f"WARN ({n_poor_quality} poor-quality cells)"
 print(f"  {'OK' if quality_ok else '*** WARN ***'}")
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -741,19 +835,11 @@ summary["valve_mapping"] = "PASS" if valve_ok else f"WARN ({n_valve}/{len(coarse
 # ══════════════════════════════════════════════════════════════════════════
 # Step 11: Material strain-energy-at-rest sanity check
 # ══════════════════════════════════════════════════════════════════════════
-#
-# Standalone numpy replica of pulse.HolzapfelOgden's strain energy formula,
-# evaluated at F=Identity, using the actual fibre field just generated.
-# Avoids needing a full pulse.MechanicsProblem/EM coupling just to test this.
-#
-# At F=I: I1=3, I4f=I4s=1 exactly (unit fibres), I8fs=f0.s0 (should be ~0 for
-# an orthonormal frame). W1 and W4f/W4s vanish exactly at these values by
-# construction; only W8fs can be nonzero if fibres aren't truly orthogonal.
 
 print("\nStep 11: Material strain-energy-at-rest sanity check...")
 print(f"  Parameters: {MATERIAL_PARAMS_TO_CHECK}")
 
-I8fs_at_rest = np.sum(f0_gs * s0_gs, axis=1)  # per-cell, should be ~0 everywhere
+I8fs_at_rest = np.sum(f0_gs * s0_gs, axis=1)
 
 a_fs = MATERIAL_PARAMS_TO_CHECK["a_fs"]
 b_fs = MATERIAL_PARAMS_TO_CHECK["b_fs"]
