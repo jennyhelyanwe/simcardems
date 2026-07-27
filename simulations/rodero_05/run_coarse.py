@@ -93,6 +93,216 @@ class PseudoECG:
         if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0 and self._file is not None:
             self._file.close()
 
+# ### DEBUG Export prescribed tractions
+# import pyvista as pv
+#
+# TRACTION_DEBUG_DIR = os.path.join(RESULTS_DIR, "traction_debug")
+# os.makedirs(TRACTION_DEBUG_DIR, exist_ok=True)
+#
+# """
+# Actual SOLVED traction at every boundary node — from mech_problem's
+# real converged stress state (First Piola stress · reference normal),
+# not the prescribed BC. Averaged from facet to vertex so it's a true
+# per-node field you can glyph directly and scan the whole surface for
+# patchiness, rather than reading one facet at a time.
+# """
+# import numpy as np
+# import pyvista as pv
+#
+#
+# def export_solved_nodal_traction(mech_problem, t_ms, outdir):
+#     geometry = mech_problem.geometry
+#     mesh = geometry.mesh
+#     ffun = geometry.ffun
+#     ffun_arr = ffun.array()
+#     mesh.init()
+#     mesh.init(2, 3)
+#     mesh.init(2, 0)
+#     coords = mesh.coordinates()
+#
+#     marker_names = {v[0]: k for k, v in geometry.markers.items()}
+#
+#     # The solver's OWN First Piola stress, from the actual converged state
+#     P = mech_problem.FirstPiolaStress()
+#     TS = dolfin.TensorFunctionSpace(mesh, "DG", 0)
+#     P_proj = dolfin.project(P, TS)
+#     P_arr = P_proj.vector().get_local().reshape(-1, 3, 3)
+#
+#     conn_23 = mesh.topology()(2, 3)
+#     conn_20 = mesh.topology()(2, 0)
+#     n_facets = mesh.num_entities(2)
+#     global_vertex_indices = mesh.topology().global_indices(0)
+#
+#     # Accumulate traction contributions per LOCAL vertex, then gather
+#     local_vertex_sum = {}   # global_vertex_id -> [sum_traction, count]
+#
+#     for fidx in range(n_facets):
+#         neighbours = conn_23(fidx)
+#         if len(neighbours) != 1:
+#             continue
+#         marker = int(ffun_arr[fidx])
+#         if marker not in marker_names:
+#             continue
+#
+#         parent_cell = neighbours[0]
+#         facet = dolfin.Facet(mesh, int(fidx))
+#         n_vec = facet.normal()
+#         N_ref = np.array([n_vec.x(), n_vec.y(), n_vec.z()])
+#
+#         Pc = P_arr[parent_cell]
+#         traction = Pc @ N_ref   # actual solved traction, this facet
+#
+#         for local_v in conn_20(fidx):
+#             gvid = int(global_vertex_indices[local_v])
+#             if gvid not in local_vertex_sum:
+#                 local_vertex_sum[gvid] = [np.zeros(3), 0]
+#             local_vertex_sum[gvid][0] += traction
+#             local_vertex_sum[gvid][1] += 1
+#
+#     local_gvid_to_coord = {int(global_vertex_indices[v]): coords[v].tolist()
+#                             for v in range(mesh.num_vertices())}
+#
+#     comm = mesh.mpi_comm()
+#     rank = dolfin.MPI.rank(comm)
+#     all_vertex_sums = dolfin.MPI.comm_world.gather(local_vertex_sum, root=0)
+#     all_coord_maps = dolfin.MPI.comm_world.gather(local_gvid_to_coord, root=0)
+#
+#     if rank != 0:
+#         return
+#
+#     # Merge contributions across ranks (shared/ghost vertices add correctly)
+#     merged = {}
+#     for vs in all_vertex_sums:
+#         for gvid, (tsum, cnt) in vs.items():
+#             if gvid not in merged:
+#                 merged[gvid] = [np.zeros(3), 0]
+#             merged[gvid][0] += tsum
+#             merged[gvid][1] += cnt
+#
+#     gvid_to_coord = {}
+#     for m in all_coord_maps:
+#         gvid_to_coord.update(m)
+#
+#     gvids = sorted(merged.keys())
+#     points = np.array([gvid_to_coord[g] for g in gvids])
+#     traction_avg = np.array([merged[g][0] / merged[g][1] for g in gvids])
+#
+#     cloud = pv.PolyData(points)
+#     cloud["solved_traction"] = traction_avg
+#     cloud["solved_traction_magnitude"] = np.linalg.norm(traction_avg, axis=1)
+#
+#     out_path = f"{outdir}/solved_nodal_traction_t{t_ms:.2f}.vtp"
+#     cloud.save(out_path)
+#     logger.debug(f"  [solved nodal traction] t={t_ms:.2f}ms: {len(points)} boundary nodes, "
+#                  f"magnitude range {cloud['solved_traction_magnitude'].min():.4f}"
+#                  f"-{cloud['solved_traction_magnitude'].max():.4f}, saved {out_path}")
+#
+# def export_pulse_prescribed_traction(mech_problem, t_ms, outdir):
+#     geometry = mech_problem.geometry
+#     mesh = geometry.mesh
+#     ffun = geometry.ffun
+#     ffun_arr = ffun.array()
+#     mesh.init()
+#     mesh.init(2, 3)
+#     coords = mesh.coordinates()
+#
+#     if not hasattr(mech_problem, "_debug_traction_parts"):
+#         raise RuntimeError("mech_problem._debug_traction_parts not found — "
+#                             "patch was not applied before MechanicsProblem construction.")
+#
+#     DG0t = dolfin.TensorFunctionSpace(mesh, "DG", 0)
+#     DG0v = dolfin.VectorFunctionSpace(mesh, "DG", 0)
+#
+#     marker_data = {}
+#     for marker, parts in mech_problem._debug_traction_parts.items():
+#         kind = parts[0]
+#         if kind == "neumann":
+#             _, traction_coeff, cofacF_expr = parts
+#             traction_val = float(traction_coeff)
+#             cofacF_proj = dolfin.project(cofacF_expr, DG0t)
+#             cofacF_arr = cofacF_proj.vector().get_local().reshape(-1, 3, 3)
+#             marker_data[marker] = ("neumann", traction_val, cofacF_arr)
+#         else:  # robin
+#             _, robin_coeff, u_expr = parts
+#             robin_val = float(robin_coeff)
+#             u_proj = dolfin.project(u_expr, DG0v)
+#             u_arr = u_proj.vector().get_local().reshape(-1, 3)
+#             marker_data[marker] = ("robin", robin_val, u_arr)
+#
+#     conn_23 = mesh.topology()(2, 3)
+#     conn_20 = mesh.topology()(2, 0)
+#     n_facets = mesh.num_entities(2)
+#     global_vertex_indices = mesh.topology().global_indices(0)
+#
+#     local_traction, local_marker, local_kind, local_face_gverts = [], [], [], []
+#
+#     for fidx in range(n_facets):
+#         neighbours = conn_23(fidx)
+#         if len(neighbours) != 1:
+#             continue
+#         marker = int(ffun_arr[fidx])
+#         if marker not in marker_data:
+#             continue
+#
+#         parent_cell = neighbours[0]
+#         facet = dolfin.Facet(mesh, int(fidx))
+#         n_vec = facet.normal()
+#         N_ref = np.array([n_vec.x(), n_vec.y(), n_vec.z()])
+#
+#         kind, scalar_val, arr = marker_data[marker]
+#         if kind == "neumann":
+#             val = scalar_val * (arr[parent_cell] @ N_ref)   # traction * cofac(F) * N
+#         else:
+#             u_cell = arr[parent_cell]
+#             u_normal = np.dot(u_cell, N_ref) * N_ref          # (u.N)N
+#             val = scalar_val * u_normal                        # robin.value * (u.N)N
+#
+#         local_verts = conn_20(fidx)
+#         gverts = [int(global_vertex_indices[vv]) for vv in local_verts]
+#         local_traction.append(val)
+#         local_marker.append(marker)
+#         local_kind.append(kind)
+#         local_face_gverts.append(gverts)
+#
+#     comm = mesh.mpi_comm()
+#     rank = dolfin.MPI.rank(comm)
+#     all_traction = dolfin.MPI.comm_world.gather(local_traction, root=0)
+#     all_marker = dolfin.MPI.comm_world.gather(local_marker, root=0)
+#     all_kind = dolfin.MPI.comm_world.gather(local_kind, root=0)
+#     all_gverts = dolfin.MPI.comm_world.gather(local_face_gverts, root=0)
+#     local_gvidx_to_coord = {int(global_vertex_indices[v]): coords[v].tolist()
+#                              for v in range(mesh.num_vertices())}
+#     all_coord_maps = dolfin.MPI.comm_world.gather(local_gvidx_to_coord, root=0)
+#
+#     if rank != 0:
+#         return
+#
+#     traction_vecs = np.array([t for sub in all_traction for t in sub])
+#     marker_list = np.array([m for sub in all_marker for m in sub])
+#     kind_list = [k for sub in all_kind for k in sub]
+#     faces_gverts = [f for sub in all_gverts for f in sub]
+#
+#     gvidx_to_coord = {}
+#     for m in all_coord_maps:
+#         gvidx_to_coord.update(m)
+#
+#     used_gverts = sorted(set(v for f in faces_gverts for v in f))
+#     gvid_to_local = {g: i for i, g in enumerate(used_gverts)}
+#     points = np.array([gvidx_to_coord[g] for g in used_gverts])
+#     faces_local = np.array([[gvid_to_local[v] for v in f] for f in faces_gverts])
+#     faces = np.hstack([np.full((len(faces_local), 1), 3), faces_local]).astype(np.int64).flatten()
+#
+#     surf = pv.PolyData(points, faces)
+#     surf.cell_data["prescribed_traction"] = traction_vecs
+#     surf.cell_data["prescribed_magnitude"] = np.linalg.norm(traction_vecs, axis=1)
+#     surf.cell_data["marker"] = marker_list
+#     surf.cell_data["bc_kind"] = np.array([0 if k == "neumann" else 1 for k in kind_list])
+#
+#     out_path = os.path.join(outdir, f"pulse_prescribed_traction_t{t_ms:.2f}.vtp")
+#     surf.save(out_path)
+#     logger.debug(f"  [pulse traction export] t={t_ms:.2f}ms: {len(faces_local)} facets, "
+#                  f"magnitude range {surf.cell_data['prescribed_magnitude'].min():.4f}"
+#                  f"-{surf.cell_data['prescribed_magnitude'].max():.4f}, saved {out_path}")
 
 # ── BiVCycleRunner ─────────────────────────────────────────────────────────────
 
@@ -134,10 +344,17 @@ class BiVCycleRunner(Runner):
 
     def _solve_mechanics(self):
         self.coupling.coupling_to_mechanics()
+
+        # t_ms_now = TimeStepper.ns2ms(self.t)
+        # export_pulse_prescribed_traction(self._mech_problem, t_ms_now, TRACTION_DEBUG_DIR)
+
         import time
         t0 = time.time()
         self.coupling.solve_mechanics()
+        # t_ms_now = TimeStepper.ns2ms(self.t)
+        # export_solved_nodal_traction(self._mech_problem, t_ms_now, TRACTION_DEBUG_DIR)
         self.coupling.update_prev_mechanics()
+
         self.coupling.mechanics_to_coupling()
         self.coupling.coupling_to_ep()
 
@@ -381,8 +598,8 @@ biv_geo.stimulus_domain = stim_domain
 logger.info('Configuring...')
 config = Config()
 config.T = 800.0
-config.dt = 0.5
-config.dt_mech = 2.5
+config.dt = 1.0
+config.dt_mech = 5.0
 config.geometry_path = MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5"
 config.outdir = RESULTS_DIR + "biv_coarse_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
@@ -394,6 +611,7 @@ config.mechanics_use_custom_newton_solver = True
 config.mechanics_solve_strategy = "hybrid"
 config.mech_threshold = 1.0
 config.relaxation_factor = 1.0
+# config.set_material = "Guccione"
 # Scalability test
 SCALABILITY_TEST = os.environ.get("SCALABILITY_TEST", "0") == "1"
 if SCALABILITY_TEST:
@@ -447,6 +665,8 @@ logger.info('Load sf IKs...')
 iks_values = load_dense_node_field(MESH_DIR + "rodero_05_fine_nodefield_sf_IKs.csv")
 iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
 
+
+
 # ── 6. EM coupling ─────────────────────────────────────────────────────────────
 # ── Parameter summary: print everything that affects the solve, up front ──
 VALVE_STIFFNESS_SCALE = 1.0 # 5.0
@@ -477,6 +697,59 @@ logger.info(f"Warm start:                {WARM_START_T_MS}")
 logger.info("=" * 60)
 
 logger.info('Setting up EM model...')
+
+
+# ── Monkey-patch: normal-only Robin BC (frictionless contact) + stash
+#    the raw traction expressions for later diagnostic export ──────────
+import pulse.mechanicsproblem as _mp
+from pulse import kinematics as _kinematics
+from pulse.dolfin_utils import list_sum as _list_sum
+try:
+    import ufl_legacy as _ufl
+except ImportError:
+    import ufl as _ufl
+
+"""
+Dirichlet BC diagnostic: dumps the ACTUAL constrained dofs from
+mech_problem._dirichlet_bc (the real pulse-constructed DirichletBC
+object(s)), with coordinates, so you can see spatially and by
+component (x/y/z) exactly what's being fixed and where.
+"""
+import numpy as np
+import pyvista as pv
+
+def _external_work_normal_robin(self, u, v):
+    F = dolfin.variable(_kinematics.DeformationGradient(u))
+    N = self.geometry.facet_normal
+    ds = self.geometry.ds
+    dx = self.geometry.dx
+
+    external_work = []
+    self._debug_traction_parts = {}  # marker -> (kind, N-free UFL piece(s))
+
+    for neumann in self.bcs.neumann:
+        n = neumann.traction * _ufl.cofac(F) * N
+        self._debug_traction_parts[neumann.marker] = ("neumann", neumann.traction, _ufl.cofac(F))
+        external_work.append(dolfin.inner(v, n) * ds(neumann.marker))
+
+    for robin in self.bcs.robin:
+        u_normal = dolfin.inner(u, N) * N
+        r = robin.value * u_normal
+        self._debug_traction_parts[robin.marker] = ("robin", robin.value, u)
+        external_work.append(dolfin.inner(r, v) * ds(robin.marker))
+
+    for body_force in self.bcs.body_force:
+        external_work.append(-dolfin.derivative(dolfin.inner(body_force, u) * dx, u, v))
+
+    if len(external_work) > 0:
+        return _list_sum(external_work)
+    return None
+
+
+_mp.MechanicsProblem._external_work = _external_work_normal_robin
+logger.info("Patched MechanicsProblem._external_work: Robin BC normal-only, "
+            "raw N-free traction components stashed for diagnostics")
+
 coupling = em_model.setup_EM_model_from_config(
     config, geometry=biv_geo, activation_times=act_fn,
     celltype_function=cell_fn, iks_scale_function=iks_fn,
@@ -485,6 +758,47 @@ coupling = em_model.setup_EM_model_from_config(
 )
 
 mech_problem = coupling.mech_solver
+
+# ── Pin a single apex point to remove rigid-body translation, while
+#    leaving BASE free to move longitudinally (diastole/systole intact) ──
+epi_marker_val = biv_geo.markers["EPI"][0]
+base_marker_val = biv_geo.markers["BASE"][0]
+
+mesh_ = biv_geo.mechanics_mesh
+mesh_.init(2, 0)
+ffun_arr_ = biv_geo.ffun.array()
+
+base_vertex_ids = set()
+epi_vertex_ids = set()
+conn20 = mesh_.topology()(2, 0)
+for fidx in range(mesh_.num_entities(2)):
+    if ffun_arr_[fidx] == base_marker_val:
+        base_vertex_ids.update(conn20(fidx))
+    elif ffun_arr_[fidx] == epi_marker_val:
+        epi_vertex_ids.update(conn20(fidx))
+
+coords_ = mesh_.coordinates()
+base_centroid = coords_[list(base_vertex_ids)].mean(axis=0)
+epi_coords = coords_[list(epi_vertex_ids)]
+dists = np.linalg.norm(epi_coords - base_centroid, axis=1)
+apex_vertex_local = list(epi_vertex_ids)[int(np.argmax(dists))]
+apex_point = coords_[apex_vertex_local]
+logger.info(f"Apex point identified at {apex_point} (farthest EPI vertex from base centroid)")
+
+def apex_dirichlet_bc(W):
+    class ApexPoint(dolfin.SubDomain):
+        def inside(self, x, on_boundary):
+            return dolfin.near(x[0], apex_point[0], 1e-6) and \
+                   dolfin.near(x[1], apex_point[1], 1e-6) and \
+                   dolfin.near(x[2], apex_point[2], 1e-6)
+    V = W.sub(0)
+    return [dolfin.DirichletBC(V, dolfin.Constant((0.0, 0.0, 0.0)),
+                                ApexPoint(), method="pointwise")]
+
+mech_problem.bcs.dirichlet = list(mech_problem.bcs.dirichlet) + [apex_dirichlet_bc]
+mech_problem._set_dirichlet_bc()   # rebuilds self._dirichlet_bc from the updated list
+mech_problem._init_solver()        # rebuilds solver using the new _dirichlet_bc
+logger.info("Apex point pinned (Dirichlet, all 3 components); solver rebuilt.")
 
 # ── 7. Cycle controller ────────────────────────────────────────────────────────
 
