@@ -547,46 +547,50 @@ coupling = em_model.setup_EM_model_from_config(
 
 mech_problem = coupling.mech_solver
 
-# ── Pin a single apex point to remove rigid-body translation, while
-#    leaving BASE free to move longitudinally (diastole/systole intact) ──
-epi_marker_val = biv_geo.markers["EPI"][0]
-base_marker_val = biv_geo.markers["BASE"][0]
 
-mesh_ = biv_geo.mechanics_mesh
-mesh_.init(2, 0)
-ffun_arr_ = biv_geo.ffun.array()
+# ── Option to fix the apex for easier mechanics convergence ──────────────────────────────────
+APPLY_APEX_PIN = False
+if APPLY_APEX_PIN:
+    # ── Pin a single apex point to remove rigid-body translation, while
+    #    leaving BASE free to move longitudinally (diastole/systole intact) ──
+    epi_marker_val = biv_geo.markers["EPI"][0]
+    base_marker_val = biv_geo.markers["BASE"][0]
 
-base_vertex_ids = set()
-epi_vertex_ids = set()
-conn20 = mesh_.topology()(2, 0)
-for fidx in range(mesh_.num_entities(2)):
-    if ffun_arr_[fidx] == base_marker_val:
-        base_vertex_ids.update(conn20(fidx))
-    elif ffun_arr_[fidx] == epi_marker_val:
-        epi_vertex_ids.update(conn20(fidx))
+    mesh_ = biv_geo.mechanics_mesh
+    mesh_.init(2, 0)
+    ffun_arr_ = biv_geo.ffun.array()
 
-coords_ = mesh_.coordinates()
-base_centroid = coords_[list(base_vertex_ids)].mean(axis=0)
-epi_coords = coords_[list(epi_vertex_ids)]
-dists = np.linalg.norm(epi_coords - base_centroid, axis=1)
-apex_vertex_local = list(epi_vertex_ids)[int(np.argmax(dists))]
-apex_point = coords_[apex_vertex_local]
-logger.info(f"Apex point identified at {apex_point} (farthest EPI vertex from base centroid)")
+    base_vertex_ids = set()
+    epi_vertex_ids = set()
+    conn20 = mesh_.topology()(2, 0)
+    for fidx in range(mesh_.num_entities(2)):
+        if ffun_arr_[fidx] == base_marker_val:
+            base_vertex_ids.update(conn20(fidx))
+        elif ffun_arr_[fidx] == epi_marker_val:
+            epi_vertex_ids.update(conn20(fidx))
 
-def apex_dirichlet_bc(W):
-    class ApexPoint(dolfin.SubDomain):
-        def inside(self, x, on_boundary):
-            return dolfin.near(x[0], apex_point[0], 1e-6) and \
-                   dolfin.near(x[1], apex_point[1], 1e-6) and \
-                   dolfin.near(x[2], apex_point[2], 1e-6)
-    V = W.sub(0)
-    return [dolfin.DirichletBC(V, dolfin.Constant((0.0, 0.0, 0.0)),
-                                ApexPoint(), method="pointwise")]
+    coords_ = mesh_.coordinates()
+    base_centroid = coords_[list(base_vertex_ids)].mean(axis=0)
+    epi_coords = coords_[list(epi_vertex_ids)]
+    dists = np.linalg.norm(epi_coords - base_centroid, axis=1)
+    apex_vertex_local = list(epi_vertex_ids)[int(np.argmax(dists))]
+    apex_point = coords_[apex_vertex_local]
+    logger.info(f"Apex point identified at {apex_point} (farthest EPI vertex from base centroid)")
 
-mech_problem.bcs.dirichlet = list(mech_problem.bcs.dirichlet) + [apex_dirichlet_bc]
-mech_problem._set_dirichlet_bc()   # rebuilds self._dirichlet_bc from the updated list
-mech_problem._init_solver()        # rebuilds solver using the new _dirichlet_bc
-logger.info("Apex point pinned (Dirichlet, all 3 components); solver rebuilt.")
+    def apex_dirichlet_bc(W):
+        class ApexPoint(dolfin.SubDomain):
+            def inside(self, x, on_boundary):
+                return dolfin.near(x[0], apex_point[0], 1e-6) and \
+                       dolfin.near(x[1], apex_point[1], 1e-6) and \
+                       dolfin.near(x[2], apex_point[2], 1e-6)
+        V = W.sub(0)
+        return [dolfin.DirichletBC(V, dolfin.Constant((0.0, 0.0, 0.0)),
+                                    ApexPoint(), method="pointwise")]
+
+    mech_problem.bcs.dirichlet = list(mech_problem.bcs.dirichlet) + [apex_dirichlet_bc]
+    mech_problem._set_dirichlet_bc()   # rebuilds self._dirichlet_bc from the updated list
+    mech_problem._init_solver()        # rebuilds solver using the new _dirichlet_bc
+    logger.info("Apex point pinned (Dirichlet, all 3 components); solver rebuilt.")
 
 # ── 7. Cycle controller ────────────────────────────────────────────────────────
 
