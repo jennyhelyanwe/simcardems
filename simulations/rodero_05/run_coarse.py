@@ -165,7 +165,7 @@ class BiVCycleRunner(Runner):
                         f"dt_mech {self._config.dt_mech} -> {target_dt_mech}")
             self._config.dt_mech = target_dt_mech
             self._config.dt = target_dt_ep
-            self._time_stepper.dt = target_dt_ep
+            self._time_stepper.dt = TimeStepper.ms2ns(target_dt_ep)
 
         t1 = time.time()
         logger.debug(f"  Mechanics solve time: {t1 - t0:.2f}s")
@@ -400,12 +400,14 @@ biv_geo.stimulus_domain = stim_domain
 logger.info('Configuring...')
 config = Config()
 config.T = 800.0
-config.dt = 1.0
+config.dt = 10.0
 config.dt_mech = 10.0
 config.geometry_path = MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5"
 config.outdir = RESULTS_DIR + "biv_coarse_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
-config.save_freq = 10
+config.save_freq = 20 # ms
+assert config.save_freq >= config.dt
+assert config.save_freq >= config.dt_mech
 config.linear_mechanics_solver = "mumps"
 config.spring = 50.0
 config.traction = 0.005
@@ -477,8 +479,8 @@ logger.info("RUN PARAMETERS")
 logger.info("=" * 60)
 logger.info(f"Resolution:                {RESOLUTION}")
 logger.info(f"T (total time):            {config.T} ms")
-logger.info(f"dt (EP):                   {config.dt} ms")
-logger.info(f"dt_mech:                   {config.dt_mech} ms")
+logger.info(f"Initial dt (EP):           {config.dt} ms")
+logger.info(f"Initial dt_mech:           {config.dt_mech} ms")
 logger.info(f"Coupling type:             {config.coupling_type}")
 logger.info(f"Linear mechanics solver:   {config.linear_mechanics_solver}")
 logger.info(f"Custom Newton solver:      {config.mechanics_use_custom_newton_solver}")
@@ -548,8 +550,7 @@ def _external_work_normal_robin(self, u, v):
 
 
 _mp.MechanicsProblem._external_work = _external_work_normal_robin
-logger.info("Patched MechanicsProblem._external_work: Robin BC normal-only, "
-            "raw N-free traction components stashed for diagnostics")
+logger.info("Patched MechanicsProblem._external_work: Robin BC normal-only")
 
 coupling = em_model.setup_EM_model_from_config(
     config, geometry=biv_geo, activation_times=act_fn,
@@ -632,7 +633,7 @@ lv_params = CycleParams(
     t_prestress=0.0,
     preload_pressure=0.5,
     prestress_pressure=0.0,
-    t_end_diastole=130.0,
+    t_end_diastole=120.0,
     p_end_diastole=1.0,
     gain_contraction=(0.01, 0.0),
     gain_relaxation=(0.05, 0.01),
@@ -651,7 +652,7 @@ rv_params = CycleParams(
     t_prestress=0.0,
     preload_pressure=0.17,
     prestress_pressure=0.0,
-    t_end_diastole=130.0,
+    t_end_diastole=120.0,
     p_end_diastole=0.33,
     gain_contraction=(0.01, 0.0),
     gain_relaxation=(0.5, 0.2),
@@ -761,6 +762,15 @@ if WARM_START_T_MS is not None:
         logger.info(f"Restarting from t={t_restart:.1f} ms")
     else:
         logger.info(f"WARNING: warm start file not found for t={WARM_START_T_MS:.1f} ms")
+
+# Set initial dt/dt_mech based on starting phase, BEFORE solve() reads
+# config.dt to build save_it and construct the TimeStepper.
+if cycle_controller.lv_state.phase == Phase.PRELOAD:
+    config.dt = 10.0
+    config.dt_mech = 10.0
+else:
+    config.dt = 0.05
+    config.dt_mech =  5.0
 
 try:
     runner.solve(T=config.T, save_freq=config.save_freq, show_progress_bar=False)

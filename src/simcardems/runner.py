@@ -155,7 +155,7 @@ class Runner:
 
     def _solve_mechanics_now(self) -> bool:
         if self._config.mechanics_solve_strategy == "fixed":
-            return self.coupling.dt_mechanics > self._config.dt_mech
+            return self.coupling.dt_mechanics >= self._config.dt_mech
 
         self.coupling.assigners.assign_pre()
         norm = self.coupling.assigners.compute_pre_norm()
@@ -215,7 +215,7 @@ class Runner:
             self._post_ep()
 
             if self._solve_mechanics_now():
-                logger.debug(f"Solve mechanics model at step {i} from ")
+                logger.debug(f"Solve mechanics model at step {i}, t={TimeStepper.ns2ms(t):.2f} ms")
                 self._solve_mechanics()
 
             # Store every 'save_freq' ms
