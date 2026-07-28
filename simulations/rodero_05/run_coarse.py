@@ -154,6 +154,19 @@ class BiVCycleRunner(Runner):
             t=t_ms,
             dt=dt_ms,
         )
+        if self._cycle_controller.lv_state.phase == Phase.PRELOAD:
+            target_dt_mech = 10.0  # your current, larger passive-inflation step
+            target_dt_ep = 10.0
+        else:
+            target_dt_mech = 5.0  # smaller, for IVC onward
+            target_dt_ep = 0.05
+        if self._config.dt_mech != target_dt_mech:
+            logger.info(f"Phase change detected (phase={self._cycle_controller.lv_state.phase}): "
+                        f"dt_mech {self._config.dt_mech} -> {target_dt_mech}")
+            self._config.dt_mech = target_dt_mech
+            self._config.dt = target_dt_ep
+            self._time_stepper.dt = target_dt_ep
+
         t1 = time.time()
         logger.debug(f"  Mechanics solve time: {t1 - t0:.2f}s")
         lv = self._cycle_controller.lv_state
@@ -388,16 +401,16 @@ logger.info('Configuring...')
 config = Config()
 config.T = 800.0
 config.dt = 1.0
-config.dt_mech = 5.0
+config.dt_mech = 10.0
 config.geometry_path = MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5"
 config.outdir = RESULTS_DIR + "biv_coarse_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
-config.save_freq = 2
+config.save_freq = 10
 config.linear_mechanics_solver = "mumps"
 config.spring = 50.0
 config.traction = 0.005
 config.mechanics_use_custom_newton_solver = True
-config.mechanics_solve_strategy = "hybrid"
+config.mechanics_solve_strategy = "fixed"
 config.mech_threshold = 1.0
 config.relaxation_factor = 1.0
 # config.set_material = "Guccione"
@@ -409,28 +422,28 @@ if SCALABILITY_TEST:
 
 # Reverted (transversely isotropic) material parameters - known-good baseline.
 # The full orthotropic set is a separate, still-open experiment - see notes.
-# material_params_override = dict(
-#     a=2.28,
-#     a_f=1.686,
-#     b=9.726,
-#     b_f=15.779,
-#     a_s=0.0,
-#     b_s=0.0,
-#     a_fs=0.0,
-#     b_fs=0.0,
-# )
-
-MATERIAL_SCALE = 1
 material_params_override = dict(
-    a=0.61 * MATERIAL_SCALE,
-    a_f=1.56* MATERIAL_SCALE,
-    b=7.5,
-    b_f=35.31,
-    a_s=0.70* MATERIAL_SCALE,
-    b_s=33.24,
-    a_fs=0.46* MATERIAL_SCALE,
-    b_fs=5.09,
+    a=2.28,
+    a_f=1.686,
+    b=9.726,
+    b_f=15.779,
+    a_s=0.0,
+    b_s=0.0,
+    a_fs=0.0,
+    b_fs=0.0,
 )
+
+# MATERIAL_SCALE = 1
+# material_params_override = dict(
+#     a=0.61 * MATERIAL_SCALE,
+#     a_f=1.56* MATERIAL_SCALE,
+#     b=7.5,
+#     b_f=35.31,
+#     a_s=0.70* MATERIAL_SCALE,
+#     b_s=33.24,
+#     a_fs=0.46* MATERIAL_SCALE,
+#     b_fs=5.09,
+# )
 # material_params_override = dict(
 #     a=0.059,
 #     b=0.023,
@@ -458,7 +471,7 @@ iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
 
 # ── 6. EM coupling ─────────────────────────────────────────────────────────────
 # ── Parameter summary: print everything that affects the solve, up front ──
-VALVE_STIFFNESS_SCALE = 1.0 # 5.0
+VALVE_STIFFNESS_SCALE = 3.0
 logger.info("" + "=" * 60)
 logger.info("RUN PARAMETERS")
 logger.info("=" * 60)

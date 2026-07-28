@@ -107,10 +107,6 @@ class EMCoupling(BaseEMCoupling):
         self.mech_solver.material.active.register_time_stepper(time_stepper)
 
     @property
-    def dt_mechanics(self) -> float:
-        return self.mech_solver.material.active.dt
-
-    @property
     def mech_mesh(self):
         return self.geometry.mechanics_mesh
 
@@ -201,6 +197,7 @@ class EMCoupling(BaseEMCoupling):
 
     def update_prev_mechanics(self):
         self.mech_solver.material.active.update_prev()
+        self._t_mechanics_prev = self._time_stepper.t
 
     def update_prev_ep(self):
         self.ep_solver.vs_.assign(self.ep_solver.vs)
