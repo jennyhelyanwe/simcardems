@@ -409,28 +409,28 @@ if SCALABILITY_TEST:
 
 # Reverted (transversely isotropic) material parameters - known-good baseline.
 # The full orthotropic set is a separate, still-open experiment - see notes.
-material_params_override = dict(
-    a=2.28,
-    a_f=1.686,
-    b=9.726,
-    b_f=15.779,
-    a_s=0.0,
-    b_s=0.0,
-    a_fs=0.0,
-    b_fs=0.0,
-)
-
-# MATERIAL_SCALE = 1
 # material_params_override = dict(
-#     a=0.61 * MATERIAL_SCALE,
-#     a_f=1.56* MATERIAL_SCALE,
-#     b=7.5,
-#     b_f=35.31,
-#     a_s=0.70* MATERIAL_SCALE,
-#     b_s=33.24,
-#     a_fs=0.46* MATERIAL_SCALE,
-#     b_fs=5.09,
+#     a=2.28,
+#     a_f=1.686,
+#     b=9.726,
+#     b_f=15.779,
+#     a_s=0.0,
+#     b_s=0.0,
+#     a_fs=0.0,
+#     b_fs=0.0,
 # )
+
+MATERIAL_SCALE = 1
+material_params_override = dict(
+    a=0.61 * MATERIAL_SCALE,
+    a_f=1.56* MATERIAL_SCALE,
+    b=7.5,
+    b_f=35.31,
+    a_s=0.70* MATERIAL_SCALE,
+    b_s=33.24,
+    a_fs=0.46* MATERIAL_SCALE,
+    b_fs=5.09,
+)
 # material_params_override = dict(
 #     a=0.059,
 #     b=0.023,
@@ -620,7 +620,7 @@ lv_params = CycleParams(
     preload_pressure=0.5,
     prestress_pressure=0.0,
     t_end_diastole=130.0,
-    p_end_diastole=1.3,
+    p_end_diastole=1.0,
     gain_contraction=(0.01, 0.0),
     gain_relaxation=(0.05, 0.01),
     p_fill=0.1,
@@ -638,8 +638,8 @@ rv_params = CycleParams(
     t_prestress=0.0,
     preload_pressure=0.17,
     prestress_pressure=0.0,
-    t_end_diastole=100.0,
-    p_end_diastole=0.2,
+    t_end_diastole=130.0,
+    p_end_diastole=0.33,
     gain_contraction=(0.01, 0.0),
     gain_relaxation=(0.5, 0.2),
     p_fill=0.033,

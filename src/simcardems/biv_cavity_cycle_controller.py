@@ -216,10 +216,9 @@ def compute_target_pressure(
         dvol_aux = state.volume_n - state.end_dia_vol
         ddvol = dvol / dt
         # Estimate dP/dV from simulation history
-        dV = state.volume_n - state.volume_n_minus_1
         dP = state.pressure_n - state.pressure_n_minus_1
-        if abs(dV) > 1.0 and abs(dP) > 1e-6:
-            gain_err = abs(dP) / abs(dV)  # kPa/mm³
+        if abs(dvol_aux) > 1.0 and abs(dP) > 1e-6:
+            gain_err = abs(dP) / abs(dvol_aux)  # kPa/mm³
         else:
             gain_err = state.pressure_n / max(state.volume_n, 1e-12)
         pressure = state.pressure_n - gain_err * dvol_aux - p.gain_contraction[1] * ddvol
@@ -235,10 +234,10 @@ def compute_target_pressure(
     elif state.phase == Phase.ISOVOL_RELAXATION:
         dvol_aux = state.volume_n - state.end_sys_vol
         ddvol = dvol / dt
-        dV = state.volume_n - state.volume_n_minus_1
+        # dV = state.volume_n - state.volume_n_minus_1
         dP = state.pressure_n - state.pressure_n_minus_1
-        if abs(dV) > 1.0 and abs(dP) > 1e-6:
-            gain_err_r = abs(dP) / abs(dV)
+        if abs(dvol_aux) > 1.0 and abs(dP) > 1e-6:
+            gain_err_r = abs(dP) / abs(dvol_aux)
         else:
             gain_err_r = state.pressure_n / max(state.volume_n, 1e-12)
         pressure = state.pressure_n - gain_err_r * dvol_aux - p.gain_relaxation[1] * ddvol
