@@ -4,8 +4,8 @@ import matplotlib.gridspec as gridspec
 import time
 import os
 
-PV_FILE  = 'results/biv_coarse_run_output/pv_loop.csv'
-ECG_FILE = 'results/biv_coarse_run_output/pseudo_ecg.csv'
+PV_FILE  = 'results_4mm/biv_coarse_run_output/pv_loop.csv'
+ECG_FILE = 'results_4mm/biv_coarse_run_output/pseudo_ecg.csv'
 POLL_INTERVAL = 2.0
 
 PHASE_NAMES = {0: 'Preload', 1: 'IVC', 2: 'Ejection', 3: 'IVR', 4: 'Filling'}
@@ -24,7 +24,7 @@ def get_lead_names(path):
         return []
 
 plt.ion()
-fig = plt.figure(figsize=(24, 10))
+fig = plt.figure(figsize=(14, 8))
 gs  = gridspec.GridSpec(3, 7, figure=fig, wspace=0.45, hspace=0.55)
 
 # LV PV loop
@@ -95,6 +95,8 @@ while True:
         lvv  = pv[:, 2]/1000
         rvp  = pv[:, 3]
         rvv  = pv[:, 4]/1000
+        lv_phase = pv[:, 5]
+        rv_phase = pv[:, 6]
 
         # LV PV loop
         ax_lv_pv.cla()
@@ -129,6 +131,18 @@ while True:
         ax_v.set_title('LV & RV Volume')
         ax_v.legend(fontsize=7)
         ax_v.grid(True, alpha=0.3)
+
+        # Phase traces
+        ax_phase.cla()
+        ax_phase.step(t_ms, lv_phase, 'b-', where='post', linewidth=1.2, label='LV')
+        ax_phase.step(t_ms, rv_phase, 'g-', where='post', linewidth=1.2, label='RV')
+        ax_phase.set_ylabel('Phase')
+        ax_phase.set_xlabel('Time (ms)')
+        ax_phase.set_title('Phase')
+        ax_phase.set_yticks([0, 1, 2, 3, 4])
+        ax_phase.set_yticklabels(['Preload', 'IVC', 'Eject', 'IVR', 'Fill'], fontsize=7)
+        ax_phase.legend(fontsize=7)
+        ax_phase.grid(True, alpha=0.3)
 
     if ecg is not None and len(lead_names) > 0 and len(ecg.shape) == 2 and ecg.shape[0] > 1:
         t_ecg = ecg[:, 0]

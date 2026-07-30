@@ -210,21 +210,21 @@ def compute_target_pressure(
             )
         else:
             pressure = state.pressure_n
-        state.end_dia_vol = state.volume_n
+        state.end_dia_vol = volume_iter_k
 
     elif state.phase == Phase.ISOVOL_CONTRACTION:
-        dvol_aux = state.volume_n - state.end_dia_vol
-        ddvol = dvol / dt
-        # Estimate dP/dV from simulation history
-        dP = state.pressure_n - state.pressure_n_minus_1
-        if abs(dvol_aux) > 1.0 and abs(dP) > 1e-6:
-            gain_err = abs(dP) / abs(dvol_aux)  # kPa/mm³
-        else:
-            gain_err = state.pressure_n / max(state.volume_n, 1e-12)
+        if (volume_iter_k > state.end_dia_vol):
+            state.end_dia_vol = volume_iter_k
+        logger.info(f"EDV: {state.end_dia_vol}")
+        logger.info(f"1st VOLUME ESTIMATE: {volume_iter_k}")
+        dvol_aux = (volume_iter_k - state.end_dia_vol) * 0.001
+        ddvol = (dvol / dt) * 0.001
+        logger.info(f"dvol_aux: {dvol_aux}, ddvol: {ddvol}")
+        gain_err = (volume_iter_k*0.001) / (state.pressure_n * 10000)
         pressure = state.pressure_n - gain_err * dvol_aux - p.gain_contraction[1] * ddvol
+        logger.info(f"pressure before flooring: {pressure}")
         pressure = max(pressure, p.p_end_diastole)
-        if state.volume_n_minus_1 > state.end_dia_vol:
-            state.end_dia_vol = state.volume_n_minus_1
+        logger.info(f"gain_err: {gain_err}, NEW PRESSURE: {pressure}")
 
     elif state.phase == Phase.EJECTION:
         pressure = wdk_pres
@@ -232,14 +232,9 @@ def compute_target_pressure(
 
 
     elif state.phase == Phase.ISOVOL_RELAXATION:
-        dvol_aux = state.volume_n - state.end_sys_vol
+        dvol_aux = volume_iter_k - state.end_sys_vol
         ddvol = dvol / dt
-        # dV = state.volume_n - state.volume_n_minus_1
-        dP = state.pressure_n - state.pressure_n_minus_1
-        if abs(dvol_aux) > 1.0 and abs(dP) > 1e-6:
-            gain_err_r = abs(dP) / abs(dvol_aux)
-        else:
-            gain_err_r = state.pressure_n / max(state.volume_n, 1e-12)
+        gain_err_r = (volume_iter_k*0.001) / (state.pressure_n * 10000)
         pressure = state.pressure_n - gain_err_r * dvol_aux - p.gain_relaxation[1] * ddvol
         pressure = min(pressure, state.pressure_n)
 
@@ -417,15 +412,26 @@ class BiVCycleController:
                 traceback.print_exc()
                 raise
 
-        # u_new, _ = problem.state.split(deepcopy=True)
-        # v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker)
-        # v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker)
-        #
-        # commit_step(self.lv_state, v_lv_new, target_lv)
-        # commit_step(self.rv_state, v_rv_new, target_rv)
-        #
-        # advance_phase(self.lv_state, t, dt)
-        # advance_phase(self.rv_state, t, dt)
+        # ── NEW: one correction pass, IVC/IVR only ──────────────────────
+        isovol_phases = (Phase.ISOVOL_CONTRACTION, Phase.ISOVOL_RELAXATION)
+        if self.lv_state.phase in isovol_phases or self.rv_state.phase in isovol_phases:
+            u_trial, _ = problem.state.split(deepcopy=True)
+            v_lv_trial = compute_cavity_volume(self.geometry, u_trial, self.lv_marker)
+            v_rv_trial = compute_cavity_volume(self.geometry, u_trial, self.rv_marker)
+
+            # Recompute target pressure using the volume the trial solve
+            # actually produced, rather than the volume from last step —
+            # this is the "solve, correct, re-solve" pass Alya does via
+            # ITER_K inside its inner Newton loop.
+            corrected_lv = compute_target_pressure(self.lv_state, v_lv_trial, t, dt)
+            corrected_rv = compute_target_pressure(self.rv_state, v_rv_trial, t, dt)
+
+            pulse.iterate.iterate(
+                problem,
+                control=(self.lv_pressure_constant, self.rv_pressure_constant),
+                target=(corrected_lv, corrected_rv),
+            )
+            target_lv, target_rv = corrected_lv, corrected_rv
 
         try:
             u_new, _ = problem.state.split(deepcopy=True)
