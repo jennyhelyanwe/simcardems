@@ -210,8 +210,12 @@ class EMCoupling(BaseEMCoupling):
     def coupling_to_mechanics(self):
         logger.debug("Interpolate mechanics")
         if hasattr(self, "_assigners"):
+            xs_ep_max = self.assigners.functions["ep"]["XS"].vector().max()
             self.XS_mech.interpolate(self.assigners.functions["ep"]["XS"])
             self.XW_mech.interpolate(self.assigners.functions["ep"]["XW"])
+
+            ca_max = self.assigners.functions["ep"]["Ca"].vector().max()
+            catrpn_max = self.assigners.functions["ep"]["CaTrpn"].vector().max()
         logger.debug("Done interpolating mechanics")
 
     def mechanics_to_coupling(self):

@@ -298,10 +298,7 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
                     self.material.active._dLambda,
                     (lmbda - self.material.active.lmbda_prev) / self.material.active.dt,
                 )
-
             self.material.active._projector.project(self.material.active.Ta_current, self.material.active.Ta(lmbda))
-            # print('self.material.active.Ta(lmbda)', self.material.active.Ta(lmbda))
-            # quit()
             self.material.active.update_current(lmbda=lmbda)
             self.material.active.update_prev()
 

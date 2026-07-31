@@ -206,11 +206,10 @@ class LandModel(pulse.ActiveModel):
         self._t_prev = self.t
 
     def Ta(self, lmbda):
-        logger.debug("Evaluate Ta")
         Tref = self._parameters["Tref"]
         rs = self._parameters["rs"]
-        scale_popu_Tref = 1.0  # self._parameters["scale_popu_Tref"]
-        scale_popu_rs = 1.0  # self._parameters["scale_popu_rs"]
+        scale_popu_Tref = 1.0
+        scale_popu_rs = 1.0
         Beta0 = self._parameters["Beta0"]
 
         _min = ufl.min_value
@@ -225,4 +224,26 @@ class LandModel(pulse.ActiveModel):
         Zetas = self.Zetas(lmbda)
         Zetaw = self.Zetaw(lmbda)
 
-        return h_lambda * (Tref * scale_popu_Tref / (rs * scale_popu_rs)) * (self.XS * (Zetas + 1.0) + self.XW * Zetaw)
+        Ta_expr = h_lambda * (Tref * scale_popu_Tref / (rs * scale_popu_rs)) * (
+                self.XS * (Zetas + 1.0) + self.XW * Zetaw
+        )
+
+        if not isinstance(lmbda, (int, float)):
+            dbg = dolfin.Function(self.function_space)
+
+            self._projector(dbg, h_lambda)
+            h_lambda_max, h_lambda_min = dbg.vector().max(), dbg.vector().min()
+
+            self._projector(dbg, Zetas)
+            zetas_max = dbg.vector().max()
+
+            self._projector(dbg, Zetaw)
+            zetaw_max = dbg.vector().max()
+
+            xs_max = self.XS.vector().max()
+            xw_max = self.XW.vector().max()
+
+            self._projector(dbg, Ta_expr)
+            ta_max = dbg.vector().max()
+
+        return Ta_expr

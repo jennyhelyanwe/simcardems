@@ -200,7 +200,7 @@ def compute_target_pressure(
                             f"{state.name}: negative pre-stress encountered"
                         )
                     state.prestress_n = new_prestress
-            state.end_preload_vol = state.volume_n
+            state.end_preload_vol = volume_iter_k
         elif p.t_end_diastole > p.t_zero and t > p.t_zero:
             pressure = (
                 (p.p_end_diastole - p.preload_pressure)
@@ -213,18 +213,7 @@ def compute_target_pressure(
         state.end_dia_vol = volume_iter_k
 
     elif state.phase == Phase.ISOVOL_CONTRACTION:
-        if (volume_iter_k > state.end_dia_vol):
-            state.end_dia_vol = volume_iter_k
-        logger.info(f"EDV: {state.end_dia_vol}")
-        logger.info(f"1st VOLUME ESTIMATE: {volume_iter_k}")
-        dvol_aux = (volume_iter_k - state.end_dia_vol) * 0.001
-        ddvol = (dvol / dt) * 0.001
-        logger.info(f"dvol_aux: {dvol_aux}, ddvol: {ddvol}")
-        gain_err = (volume_iter_k*0.001) / (state.pressure_n * 10000)
-        pressure = state.pressure_n - gain_err * dvol_aux - p.gain_contraction[1] * ddvol
-        logger.info(f"pressure before flooring: {pressure}")
-        pressure = max(pressure, p.p_end_diastole)
-        logger.info(f"gain_err: {gain_err}, NEW PRESSURE: {pressure}")
+        logger.info("Unused IVC code")
 
     elif state.phase == Phase.EJECTION:
         pressure = wdk_pres
@@ -232,11 +221,7 @@ def compute_target_pressure(
 
 
     elif state.phase == Phase.ISOVOL_RELAXATION:
-        dvol_aux = volume_iter_k - state.end_sys_vol
-        ddvol = dvol / dt
-        gain_err_r = (volume_iter_k*0.001) / (state.pressure_n * 10000)
-        pressure = state.pressure_n - gain_err_r * dvol_aux - p.gain_relaxation[1] * ddvol
-        pressure = min(pressure, state.pressure_n)
+        logger.info("Unused IVR code")
 
     elif state.phase == Phase.FILLING:
         if p.filling_gain:
@@ -353,6 +338,22 @@ class BiVCycleController:
           3. one combined iterate() call moving (LV, RV) pressure together
           4. recompute volumes from the new converged state, commit, advance phases
         """
+        isovol_phases = (Phase.ISOVOL_CONTRACTION, Phase.ISOVOL_RELAXATION)
+        if self.lv_state.phase in isovol_phases or self.rv_state.phase in isovol_phases:
+            # Pressure is already converged externally (converge_isovolumic_pressure
+            # in run_coarse.py, called BEFORE this step()). Do NOT recompute a
+            # target or re-solve here. Just commit + check transitions.
+            u_new, _ = problem.state.split(deepcopy=True)
+            v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker)
+            v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker)
+            target_lv = float(self.lv_pressure_constant)
+            target_rv = float(self.rv_pressure_constant)
+            commit_step(self.lv_state, v_lv_new, target_lv)
+            commit_step(self.rv_state, v_rv_new, target_rv)
+            advance_phase(self.lv_state, t, dt)
+            advance_phase(self.rv_state, t, dt)
+            return
+
         u, _ = problem.state.split(deepcopy=True)
         v_lv_now = compute_cavity_volume(self.geometry, u, self.lv_marker)
         v_rv_now = compute_cavity_volume(self.geometry, u, self.rv_marker)

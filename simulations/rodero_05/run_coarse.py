@@ -5,8 +5,9 @@ os.environ["XDG_CACHE_HOME"] = cache_dir
 
 import logging
 logging.getLogger("simcardems.newton_solver").setLevel(logging.DEBUG)
-logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.WARNING)
+logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.INFO)
 logging.getLogger("simcardems.runner").setLevel(logging.DEBUG)
+logging.getLogger("simcardems.models.fully_coupled_Tor_Land.active_model").setLevel(logging.INFO)
 logging.getLogger("simcardems.models.fully_coupled_Tor_Land.em_model").setLevel(logging.DEBUG)
 logging.getLogger("__main__").setLevel(logging.DEBUG)
 import dataclasses
@@ -38,26 +39,23 @@ from simcardems.biv_cavity_cycle_controller import (
     Phase,
 )
 from simcardems.postprocess import ecg_recovery
-from simcardems.geometry import refine_mesh
+from simcardems.geometry import refine_mesh, StimulusDomain
 from simcardems import utils
 
 import time
 t_script_start = time.time()
 
 logger = utils.getLogger(__name__)
-def mpi_print(*args, **kwargs):
-    if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
-        print(*args, **kwargs, flush=True)
 logger.info(['dolfin:', dolfin.__version__])
 import petsc4py; logger.info(['petsc4py:', petsc4py.__version__])
 from petsc4py import PETSc; logger.info(['PETSc:', PETSc.Sys.getVersion()])
 
 RESOLUTION = "4mm"
 MESH_DIR = "meshes/"
-RESULTS_DIR = "results/"
+RESULTS_DIR = f"results_{RESOLUTION}/"
 
 # ── Warm start configuration ──────────────────────────────────────────────────
-WARM_START_T_MS = None  # Set to e.g. 100.0 to restart from t=100ms, or None for fresh start
+WARM_START_T_MS = 110 # Set to e.g. 100.0 to restart from t=100ms, or None for fresh start
 
 # ── PseudoECG ──────────────────────────────────────────────────────────────────
 
@@ -97,10 +95,13 @@ class PseudoECG:
 
 class BiVCycleRunner(Runner):
     def set_cycle_controller(self, controller, mech_problem, outdir,
+                              lv_pressure_const, rv_pressure_const,
                               pseudo_ecg=None, dt_ecg=5.0,
                               warm_start_freq=5.0, t_restart=0.0):
         self._cycle_controller = controller
         self._mech_problem = mech_problem
+        self._lv_pressure_const = lv_pressure_const
+        self._rv_pressure_const = rv_pressure_const
         self._outdir = outdir
         self._pseudo_ecg = pseudo_ecg
         self._dt_ecg = dt_ecg
@@ -133,39 +134,59 @@ class BiVCycleRunner(Runner):
 
     def _solve_mechanics(self):
         self.coupling.coupling_to_mechanics()
-
-        # t_ms_now = TimeStepper.ns2ms(self.t)
-        # export_pulse_prescribed_traction(self._mech_problem, t_ms_now, TRACTION_DEBUG_DIR)
-
         import time
         t0 = time.time()
-        self.coupling.solve_mechanics()
-        # t_ms_now = TimeStepper.ns2ms(self.t)
-        # export_solved_nodal_traction(self._mech_problem, t_ms_now, TRACTION_DEBUG_DIR)
-        self.coupling.update_prev_mechanics()
 
+        phase = self._cycle_controller.lv_state.phase
+        if phase == Phase.ISOVOL_CONTRACTION:
+            target_vol_lv = self._cycle_controller.lv_state.end_dia_vol
+            target_vol_rv = self._cycle_controller.rv_state.end_dia_vol
+            logger.info(f"  [isovol] phase=ISOVOL_CONTRACTION, targeting end-diastolic volumes")
+        elif phase == Phase.ISOVOL_RELAXATION:
+            target_vol_lv = self._cycle_controller.lv_state.end_sys_vol
+            target_vol_rv = self._cycle_controller.rv_state.end_sys_vol
+            logger.info(f"  [isovol] phase=ISOVOL_RELAXATION, targeting end-systolic volumes")
+        else:
+            target_vol_lv = target_vol_rv = None
+
+        if target_vol_lv is not None:
+            self.coupling.solve_mechanics()
+            converged, n_it = converge_isovolumic_pressure(
+                self.coupling.solve_mechanics, biv_geo,
+                self._lv_pressure_const, self._rv_pressure_const,
+                target_vol_lv, target_vol_rv, self._mech_problem,
+            )
+            logger.info(f"  Isovolumic pressure convergence: converged={converged} in {n_it} iters")
+        else:
+            self.coupling.solve_mechanics()
+
+        self.coupling.update_prev_mechanics()
         self.coupling.mechanics_to_coupling()
         self.coupling.coupling_to_ep()
 
         t_ms = TimeStepper.ns2ms(self.t)
         dt_ms = self._config.dt
+
+        p_lv_before_step = float(self._lv_pressure_const)
+        p_rv_before_step = float(self._rv_pressure_const)
+
+        self._cycle_controller.step(problem=self._mech_problem, t=t_ms, dt=dt_ms)
+
+        p_lv_after_step = float(self._lv_pressure_const)
+        p_rv_after_step = float(self._rv_pressure_const)
+        logger.info(f"  [isovol] post-step() correction: "
+                    f"Δp_lv={p_lv_after_step - p_lv_before_step:+.4f}, "
+                    f"Δp_rv={p_rv_after_step - p_rv_before_step:+.4f} "
+                    f"(should be small if secant loop converged well)")
+
         self._cycle_controller.step(
             problem=self._mech_problem,
             t=t_ms,
             dt=dt_ms,
         )
-        if self._cycle_controller.lv_state.phase == Phase.PRELOAD:
-            target_dt_mech = 10.0  # your current, larger passive-inflation step
-            target_dt_ep = 10.0
-        else:
-            target_dt_mech = 5.0  # smaller, for IVC onward
-            target_dt_ep = 0.05
-        if self._config.dt_mech != target_dt_mech:
-            logger.info(f"Phase change detected (phase={self._cycle_controller.lv_state.phase}): "
-                        f"dt_mech {self._config.dt_mech} -> {target_dt_mech}")
-            self._config.dt_mech = target_dt_mech
-            self._config.dt = target_dt_ep
-            self._time_stepper.dt = TimeStepper.ms2ns(target_dt_ep)
+
+        apply_phase_dt(self._config, self._cycle_controller.lv_state.phase,
+                       time_stepper=self._time_stepper, logger=logger)
 
         t1 = time.time()
         logger.debug(f"  Mechanics solve time: {t1 - t0:.2f}s")
@@ -202,7 +223,8 @@ class BiVCycleRunner(Runner):
         if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0 and self._pv_file is not None:
             self._pv_file.write(
                 f"{t_ms:.3f},{lv.pressure_n:.6f},{lv.volume_n:.6f},"
-                f"{rv.pressure_n:.6f},{rv.volume_n:.6f}\n"
+                f"{rv.pressure_n:.6f},{rv.volume_n:.6f},"
+                f"{lv.phase},{rv.phase}\n"
             )
             self._pv_file.flush()
 
@@ -235,9 +257,38 @@ def check_orthonormality(f0, s0, n0, label=""):
     dot_fs = np.abs(np.sum(F * S, axis=1))
     dot_fn = np.abs(np.sum(F * N, axis=1))
     dot_sn = np.abs(np.sum(S * N, axis=1))
-    print(f"{label} f0 norm: {f0n.min():.6f}-{f0n.max():.6f}, "
+    logger.info(f"{label} f0 norm: {f0n.min():.6f}-{f0n.max():.6f}, "
           f"max|f0.s0|={dot_fs.max():.3e}, max|f0.n0|={dot_fn.max():.3e}, max|s0.n0|={dot_sn.max():.3e}")
 
+
+# ── Phase-dependent dt/dt_mech ──────────────
+def dt_targets_for_phase(phase):
+    """Returns the intended (dt, dt_mech) in ms for a given cardiac phase.
+    Edit values HERE ONLY — both the pre-loop setup and the in-loop
+    phase-change check call this same function, so they can't drift
+    out of sync with each other."""
+    if phase == Phase.PRELOAD:
+        return dict(dt=10.0, dt_mech=10.0)
+    else:
+        return dict(dt=0.5, dt_mech=1.0)
+
+
+def apply_phase_dt(config, phase, time_stepper=None, logger=None):
+    """Applies dt_targets_for_phase(phase) to config, and — if a live
+    TimeStepper is xpassed — also syncs it, with the required ms->ns
+    conversion (TimeStepper stores dt in ns after construction; its
+    setter does NOT convert for you)."""
+    targets = dt_targets_for_phase(phase)
+    changed = (config.dt != targets["dt"]) or (config.dt_mech != targets["dt_mech"])
+    if changed and logger is not None:
+        logger.info(f"dt update (phase={phase}): "
+                    f"dt {config.dt} -> {targets['dt']}, "
+                    f"dt_mech {config.dt_mech} -> {targets['dt_mech']}")
+    config.dt = targets["dt"]
+    config.dt_mech = targets["dt_mech"]
+    if time_stepper is not None:
+        time_stepper.dt = TimeStepper.ms2ns(targets["dt"])
+    return changed
 
 # ── 1. Geometry ────────────────────────────────────────────────────────────────
 logger.info('Build geometry...')
@@ -363,6 +414,77 @@ dot_fs = np.sum(f0_arr * s0_arr, axis=1)
 logger.debug(f"f0.s0 range on 4mm mesh: {dot_fs.min():.6f} to {dot_fs.max():.6f}")
 logger.debug(f"Number of cells with |f0.s0| > 0.5: {np.sum(np.abs(dot_fs) > 0.5)}")
 
+# ---- Volume convergence in IVC ---
+def converge_isovolumic_pressure(solve_mechanics_fn, biv_geo,
+                                   lv_pressure_const, rv_pressure_const,
+                                   target_vol_lv, target_vol_rv,
+                                   mech_problem, max_iters=3, tol_vol=300.0):
+    """
+    Secant iteration within a single timestep: adjust LV/RV pressure until
+    resulting cavity volumes match target_vol_lv/rv (mm^3), exploiting the
+    near-linear P-V relationship over one small step. Returns (converged, n_iters).
+    """
+    def get_volumes():
+        u_now, _ = mech_problem.state.split(deepcopy=True)
+        v_lv = pulse.dolfin_utils.get_cavity_volume(biv_geo, chamber="lv", u=u_now)
+        v_rv = pulse.dolfin_utils.get_cavity_volume(biv_geo, chamber="rv", u=u_now)
+        return v_lv, v_rv
+
+    p_lv, p_rv = float(lv_pressure_const), float(rv_pressure_const)
+    v_lv, v_rv = get_volumes()
+    err_lv, err_rv = v_lv - target_vol_lv, v_rv - target_vol_rv
+
+    logger.info(f"    [isovol converge] target: LV={target_vol_lv:.1f}mm^3 RV={target_vol_rv:.1f}mm^3")
+    logger.info(f"    [isovol converge] start:  p_lv={p_lv:.4f} v_lv={v_lv:.1f} err_lv={err_lv:+.1f}  |  "
+                f"p_rv={p_rv:.4f} v_rv={v_rv:.1f} err_rv={err_rv:+.1f}")
+
+    p_lv_prev, err_lv_prev = p_lv, err_lv
+    p_rv_prev, err_rv_prev = p_rv, err_rv
+
+    for it in range(max_iters):
+        if abs(err_lv) < tol_vol and abs(err_rv) < tol_vol:
+            logger.info(f"    [isovol converge] CONVERGED after {it} correction(s) "
+                        f"(|err_lv|={abs(err_lv):.1f} < {tol_vol}, |err_rv|={abs(err_rv):.1f} < {tol_vol})")
+            return True, it
+
+        if it == 0:
+            dp_lv = max(0.01, 0.05 * abs(p_lv))
+            dp_rv = max(0.01, 0.05 * abs(p_rv))
+            p_lv_trial = p_lv + np.sign(err_lv) * dp_lv if err_lv != 0 else p_lv
+            p_rv_trial = p_rv + np.sign(err_rv) * dp_rv if err_rv != 0 else p_rv
+            logger.info(f"    [isovol converge] iter {it}: no slope history yet, "
+                        f"perturbing p_lv {p_lv:.4f}->{p_lv_trial:.4f}, "
+                        f"p_rv {p_rv:.4f}->{p_rv_trial:.4f}")
+        else:
+            slope_lv = (err_lv - err_lv_prev) / (p_lv - p_lv_prev) if p_lv != p_lv_prev else None
+            slope_rv = (err_rv - err_rv_prev) / (p_rv - p_rv_prev) if p_rv != p_rv_prev else None
+            p_lv_trial = (p_lv - err_lv / slope_lv) if slope_lv and abs(slope_lv) > 1e-9 else p_lv
+            p_rv_trial = (p_rv - err_rv / slope_rv) if slope_rv and abs(slope_rv) > 1e-9 else p_rv
+            logger.info(f"    [isovol converge] iter {it}: slope_lv={slope_lv}, slope_rv={slope_rv}")
+            logger.info(f"    [isovol converge] iter {it}: secant update "
+                        f"p_lv {p_lv:.4f}->{p_lv_trial:.4f}, p_rv {p_rv:.4f}->{p_rv_trial:.4f}")
+
+        lv_pressure_const.assign(p_lv_trial)
+        rv_pressure_const.assign(p_rv_trial)
+        solve_mechanics_fn()
+
+        p_lv_prev, err_lv_prev = p_lv, err_lv
+        p_rv_prev, err_rv_prev = p_rv, err_rv
+        p_lv, p_rv = p_lv_trial, p_rv_trial
+
+        v_lv, v_rv = get_volumes()
+        err_lv, err_rv = v_lv - target_vol_lv, v_rv - target_vol_rv
+
+        logger.info(f"    [isovol converge] iter {it} result: "
+                    f"v_lv={v_lv:.1f} err_lv={err_lv:+.1f}  |  v_rv={v_rv:.1f} err_rv={err_rv:+.1f}")
+
+    converged = abs(err_lv) < tol_vol and abs(err_rv) < tol_vol
+    logger.info(f"    [isovol converge] {'CONVERGED' if converged else 'DID NOT CONVERGE'} "
+                f"after max_iters={max_iters} "
+                f"(final |err_lv|={abs(err_lv):.1f}, |err_rv|={abs(err_rv):.1f}, tol={tol_vol})")
+    return converged, max_iters
+
+
 # ── 2. Activation times ────────────────────────────────────────────────────────
 
 logger.info('Load activation times...')
@@ -384,16 +506,35 @@ act_fn = interpolate_activation_to_ep_mesh(
     coords_subset_mech=coords_subset,
 )
 
+UNIFORM_ACTIVATION_TEST = True
+if UNIFORM_ACTIVATION_TEST:
+    act_fn.vector()[:] = 120
+    logger.info("DEBUG: uniform activation override — every node activates at t=120 ms")
+
+    # Also widen the stimulus domain to the WHOLE mesh, not just the
+    # endocardial layer, so I_s is actually applied everywhere.
+    whole_mesh_marker = dolfin.MeshFunction("size_t", biv_geo.ep_mesh,
+                                              biv_geo.ep_mesh.topology().dim(), 1)
+    stim_domain = StimulusDomain(domain=whole_mesh_marker, marker=1)
+
 # ── 3. Stimulus domain ─────────────────────────────────────────────────────────
 
 logger.info('Create stimulus domain...')
-stim_domain = endocardial_stimulus_domain(
-    mesh=biv_geo.ep_mesh,
-    ffun=biv_geo.ffun_ep,
-    endo_markers=[biv_geo.markers["ENDO_LV"][0], biv_geo.markers["ENDO_RV"][0]],
-    layer_thickness=2,
+# stim_domain = endocardial_stimulus_domain(
+#     mesh=biv_geo.ep_mesh,
+#     ffun=biv_geo.ffun_ep,
+#     endo_markers=[biv_geo.markers["ENDO_LV"][0], biv_geo.markers["ENDO_RV"][0]],
+#     layer_thickness=2,
+# )
+# biv_geo.stimulus_domain = stim_domain
+
+
+####DEBUG ONLY
+whole_mesh_marker = dolfin.MeshFunction(
+    "size_t", biv_geo.ep_mesh, biv_geo.ep_mesh.topology().dim(), 1
 )
-biv_geo.stimulus_domain = stim_domain
+biv_geo.stimulus_domain = StimulusDomain(domain=whole_mesh_marker, marker=1)
+####
 
 # ── 4. Config ──────────────────────────────────────────────────────────────────
 
@@ -405,7 +546,7 @@ config.dt_mech = 10.0
 config.geometry_path = MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5"
 config.outdir = RESULTS_DIR + "biv_coarse_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
-config.save_freq = 20 # ms
+config.save_freq = 10 # ms
 assert config.save_freq >= config.dt
 assert config.save_freq >= config.dt_mech
 config.linear_mechanics_solver = "mumps"
@@ -635,7 +776,7 @@ lv_params = CycleParams(
     prestress_pressure=0.0,
     t_end_diastole=120.0,
     p_end_diastole=1.0,
-    gain_contraction=(0.01, 0.0),
+    gain_contraction=(0.01, 10),
     gain_relaxation=(0.05, 0.01),
     p_fill=0.1,
     period=800.0,
@@ -654,7 +795,7 @@ rv_params = CycleParams(
     prestress_pressure=0.0,
     t_end_diastole=120.0,
     p_end_diastole=0.33,
-    gain_contraction=(0.01, 0.0),
+    gain_contraction=(0.01, 10),
     gain_relaxation=(0.5, 0.2),
     p_fill=0.033,
     period=800.0,
@@ -734,9 +875,9 @@ if WARM_START_T_MS is not None:
 
 runner.set_cycle_controller(
     cycle_controller, mech_problem, config.outdir,
+    lv_pressure_const, rv_pressure_const,
     pseudo_ecg=pseudo_ecg, dt_ecg=5.0,
-    warm_start_freq=5.0,
-    t_restart=t_restart,
+    warm_start_freq=5.0, t_restart=t_restart,
 )
 
 if WARM_START_T_MS is not None:
@@ -765,12 +906,7 @@ if WARM_START_T_MS is not None:
 
 # Set initial dt/dt_mech based on starting phase, BEFORE solve() reads
 # config.dt to build save_it and construct the TimeStepper.
-if cycle_controller.lv_state.phase == Phase.PRELOAD:
-    config.dt = 10.0
-    config.dt_mech = 10.0
-else:
-    config.dt = 0.05
-    config.dt_mech =  5.0
+apply_phase_dt(config, cycle_controller.lv_state.phase, time_stepper=None, logger=logger)
 
 try:
     runner.solve(T=config.T, save_freq=config.save_freq, show_progress_bar=False)
