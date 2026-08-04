@@ -182,7 +182,13 @@ def compute_target_pressure(
     dvol = volume_iter_k - state.volume_n
     ddvol = dvol / dt
 
+    logger.info(f"  [wdk debug] compute_target_pressure ENTRY: phase={state.phase}, "
+                f"wdk_pressure_n BEFORE update={state.wdk_pressure_n:.4f}")
+
     wdk_pres = _update_windkessel(state, dvol if state.phase == Phase.EJECTION else 0.0, dt)
+
+    logger.info(f"  [wdk debug] _update_windkessel returned wdk_pres={wdk_pres:.4f} "
+                f"(phase={state.phase}, dvol={dvol:.4f}, dt={dt})")
 
     if state.phase == Phase.PRELOAD:
         if t <= p.t_zero:
@@ -330,119 +336,119 @@ class BiVCycleController:
         self.lv_state.initialize(v_lv)
         self.rv_state.initialize(v_rv)
 
-    def step(self, problem: pulse.MechanicsProblem, t: float, dt: float):
-        """
-        One macro time step:
-          1. compute each cavity's current volume from the LAST converged state
-          2. compute each cavity's target pressure independently (different phases OK)
-          3. one combined iterate() call moving (LV, RV) pressure together
-          4. recompute volumes from the new converged state, commit, advance phases
-        """
-        isovol_phases = (Phase.ISOVOL_CONTRACTION, Phase.ISOVOL_RELAXATION)
-        if self.lv_state.phase in isovol_phases or self.rv_state.phase in isovol_phases:
-            # Pressure is already converged externally (converge_isovolumic_pressure
-            # in run_coarse.py, called BEFORE this step()). Do NOT recompute a
-            # target or re-solve here. Just commit + check transitions.
-            u_new, _ = problem.state.split(deepcopy=True)
-            v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker)
-            v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker)
-            target_lv = float(self.lv_pressure_constant)
-            target_rv = float(self.rv_pressure_constant)
-            commit_step(self.lv_state, v_lv_new, target_lv)
-            commit_step(self.rv_state, v_rv_new, target_rv)
-            advance_phase(self.lv_state, t, dt)
-            advance_phase(self.rv_state, t, dt)
-            return
-
-        u, _ = problem.state.split(deepcopy=True)
-        v_lv_now = compute_cavity_volume(self.geometry, u, self.lv_marker)
-        v_rv_now = compute_cavity_volume(self.geometry, u, self.rv_marker)
-
-        target_lv = compute_target_pressure(self.lv_state, v_lv_now, t, dt)
-        target_rv = compute_target_pressure(self.rv_state, v_rv_now, t, dt)
-        # target_lv = 0.0
-        # target_rv = 0.0
-        # if self.lv_state.phase == Phase.PRELOAD and self.rv_state.phase == Phase.PRELOAD:
-            # During preload assign directly — pressure ramps linearly and
-            # is small, no need for pulse.iterate's cautious stepping
-            # self.lv_pressure_constant.assign(target_lv)
-            # self.rv_pressure_constant.assign(target_rv)
-            # logger.debug(f"[PRELOAD] target_lv: {target_lv!r} kPa, target_rv: {target_rv!r} kPa")
-            # problem.solve()
-        if self.lv_state.phase == Phase.PRELOAD and self.rv_state.phase == Phase.PRELOAD:
-            # Use pulse.iterate instead of direct assignment
-            pulse.iterate.iterate(
-                problem,
-                control=(self.lv_pressure_constant, self.rv_pressure_constant),
-                target=(target_lv, target_rv),
-            )
-        else:
-            # self.lv_pressure_constant.assign(0.0)
-            # self.rv_pressure_constant.assign(0.0)
-            try:
-                lv_unchanged = abs(target_lv - float(self.lv_pressure_constant)) < 1e-10
-                rv_unchanged = abs(target_rv - float(self.rv_pressure_constant)) < 1e-10
-
-                if lv_unchanged and rv_unchanged:
-                    print('Both LVP and RVP are unchanged')
-                    problem.solve()
-                elif lv_unchanged:
-                    print('LVP is unchanged.')
-                    self.lv_pressure_constant.assign(target_lv)
-                    pulse.iterate.iterate(
-                        problem,
-                        control=self.rv_pressure_constant,
-                        target=target_rv,
-                    )
-                elif rv_unchanged:
-                    print('RVP is unchanged.')
-                    self.rv_pressure_constant.assign(target_rv)
-                    pulse.iterate.iterate(
-                        problem,
-                        control=self.lv_pressure_constant,
-                        target=target_lv,
-                    )
-                else:
-                    pulse.iterate.iterate(
-                        problem,
-                        control=(self.lv_pressure_constant, self.rv_pressure_constant),
-                        target=(target_lv, target_rv),
-                    )
-            except ZeroDivisionError:
-                import traceback
-                traceback.print_exc()
-                raise
-
-        # ── NEW: one correction pass, IVC/IVR only ──────────────────────
-        isovol_phases = (Phase.ISOVOL_CONTRACTION, Phase.ISOVOL_RELAXATION)
-        if self.lv_state.phase in isovol_phases or self.rv_state.phase in isovol_phases:
-            u_trial, _ = problem.state.split(deepcopy=True)
-            v_lv_trial = compute_cavity_volume(self.geometry, u_trial, self.lv_marker)
-            v_rv_trial = compute_cavity_volume(self.geometry, u_trial, self.rv_marker)
-
-            # Recompute target pressure using the volume the trial solve
-            # actually produced, rather than the volume from last step —
-            # this is the "solve, correct, re-solve" pass Alya does via
-            # ITER_K inside its inner Newton loop.
-            corrected_lv = compute_target_pressure(self.lv_state, v_lv_trial, t, dt)
-            corrected_rv = compute_target_pressure(self.rv_state, v_rv_trial, t, dt)
-
-            pulse.iterate.iterate(
-                problem,
-                control=(self.lv_pressure_constant, self.rv_pressure_constant),
-                target=(corrected_lv, corrected_rv),
-            )
-            target_lv, target_rv = corrected_lv, corrected_rv
-
-        try:
-            u_new, _ = problem.state.split(deepcopy=True)
-            v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker)
-            v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker)
-            commit_step(self.lv_state, v_lv_new, target_lv)
-            commit_step(self.rv_state, v_rv_new, target_rv)
-            advance_phase(self.lv_state, t, dt)
-            advance_phase(self.rv_state, t, dt)
-        except ZeroDivisionError as e:
-            import traceback
-            traceback.print_exc()
-            raise
+    # def step(self, problem: pulse.MechanicsProblem, t: float, dt: float):
+    #     """
+    #     One macro time step:
+    #       1. compute each cavity's current volume from the LAST converged state
+    #       2. compute each cavity's target pressure independently (different phases OK)
+    #       3. one combined iterate() call moving (LV, RV) pressure together
+    #       4. recompute volumes from the new converged state, commit, advance phases
+    #     """
+    #     isovol_phases = (Phase.ISOVOL_CONTRACTION, Phase.ISOVOL_RELAXATION)
+    #     if self.lv_state.phase in isovol_phases or self.rv_state.phase in isovol_phases:
+    #         # Pressure is already converged externally (converge_isovolumic_pressure
+    #         # in run_coarse.py, called BEFORE this step()). Do NOT recompute a
+    #         # target or re-solve here. Just commit + check transitions.
+    #         u_new, _ = problem.state.split(deepcopy=True)
+    #         v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker)
+    #         v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker)
+    #         target_lv = float(self.lv_pressure_constant)
+    #         target_rv = float(self.rv_pressure_constant)
+    #         commit_step(self.lv_state, v_lv_new, target_lv)
+    #         commit_step(self.rv_state, v_rv_new, target_rv)
+    #         advance_phase(self.lv_state, t, dt)
+    #         advance_phase(self.rv_state, t, dt)
+    #         return
+    #
+    #     u, _ = problem.state.split(deepcopy=True)
+    #     v_lv_now = compute_cavity_volume(self.geometry, u, self.lv_marker)
+    #     v_rv_now = compute_cavity_volume(self.geometry, u, self.rv_marker)
+    #
+    #     target_lv = compute_target_pressure(self.lv_state, v_lv_now, t, dt)
+    #     target_rv = compute_target_pressure(self.rv_state, v_rv_now, t, dt)
+    #     # target_lv = 0.0
+    #     # target_rv = 0.0
+    #     # if self.lv_state.phase == Phase.PRELOAD and self.rv_state.phase == Phase.PRELOAD:
+    #         # During preload assign directly — pressure ramps linearly and
+    #         # is small, no need for pulse.iterate's cautious stepping
+    #         # self.lv_pressure_constant.assign(target_lv)
+    #         # self.rv_pressure_constant.assign(target_rv)
+    #         # logger.debug(f"[PRELOAD] target_lv: {target_lv!r} kPa, target_rv: {target_rv!r} kPa")
+    #         # problem.solve()
+    #     if self.lv_state.phase == Phase.PRELOAD and self.rv_state.phase == Phase.PRELOAD:
+    #         # Use pulse.iterate instead of direct assignment
+    #         pulse.iterate.iterate(
+    #             problem,
+    #             control=(self.lv_pressure_constant, self.rv_pressure_constant),
+    #             target=(target_lv, target_rv),
+    #         )
+    #     else:
+    #         # self.lv_pressure_constant.assign(0.0)
+    #         # self.rv_pressure_constant.assign(0.0)
+    #         try:
+    #             lv_unchanged = abs(target_lv - float(self.lv_pressure_constant)) < 1e-10
+    #             rv_unchanged = abs(target_rv - float(self.rv_pressure_constant)) < 1e-10
+    #
+    #             if lv_unchanged and rv_unchanged:
+    #                 print('Both LVP and RVP are unchanged')
+    #                 problem.solve()
+    #             elif lv_unchanged:
+    #                 print('LVP is unchanged.')
+    #                 self.lv_pressure_constant.assign(target_lv)
+    #                 pulse.iterate.iterate(
+    #                     problem,
+    #                     control=self.rv_pressure_constant,
+    #                     target=target_rv,
+    #                 )
+    #             elif rv_unchanged:
+    #                 print('RVP is unchanged.')
+    #                 self.rv_pressure_constant.assign(target_rv)
+    #                 pulse.iterate.iterate(
+    #                     problem,
+    #                     control=self.lv_pressure_constant,
+    #                     target=target_lv,
+    #                 )
+    #             else:
+    #                 pulse.iterate.iterate(
+    #                     problem,
+    #                     control=(self.lv_pressure_constant, self.rv_pressure_constant),
+    #                     target=(target_lv, target_rv),
+    #                 )
+    #         except ZeroDivisionError:
+    #             import traceback
+    #             traceback.print_exc()
+    #             raise
+    #
+    #     # ── NEW: one correction pass, IVC/IVR only ──────────────────────
+    #     isovol_phases = (Phase.ISOVOL_CONTRACTION, Phase.ISOVOL_RELAXATION)
+    #     if self.lv_state.phase in isovol_phases or self.rv_state.phase in isovol_phases:
+    #         u_trial, _ = problem.state.split(deepcopy=True)
+    #         v_lv_trial = compute_cavity_volume(self.geometry, u_trial, self.lv_marker)
+    #         v_rv_trial = compute_cavity_volume(self.geometry, u_trial, self.rv_marker)
+    #
+    #         # Recompute target pressure using the volume the trial solve
+    #         # actually produced, rather than the volume from last step —
+    #         # this is the "solve, correct, re-solve" pass Alya does via
+    #         # ITER_K inside its inner Newton loop.
+    #         corrected_lv = compute_target_pressure(self.lv_state, v_lv_trial, t, dt)
+    #         corrected_rv = compute_target_pressure(self.rv_state, v_rv_trial, t, dt)
+    #
+    #         pulse.iterate.iterate(
+    #             problem,
+    #             control=(self.lv_pressure_constant, self.rv_pressure_constant),
+    #             target=(corrected_lv, corrected_rv),
+    #         )
+    #         target_lv, target_rv = corrected_lv, corrected_rv
+    #
+    #     try:
+    #         u_new, _ = problem.state.split(deepcopy=True)
+    #         v_lv_new = compute_cavity_volume(self.geometry, u_new, self.lv_marker)
+    #         v_rv_new = compute_cavity_volume(self.geometry, u_new, self.rv_marker)
+    #         commit_step(self.lv_state, v_lv_new, target_lv)
+    #         commit_step(self.rv_state, v_rv_new, target_rv)
+    #         advance_phase(self.lv_state, t, dt)
+    #         advance_phase(self.rv_state, t, dt)
+    #     except ZeroDivisionError as e:
+    #         import traceback
+    #         traceback.print_exc()
+    #         raise
