@@ -4,8 +4,8 @@ import matplotlib.gridspec as gridspec
 import time
 import os
 
-PV_FILE  = 'output_lv_ellipsoid/pv_loop.csv'
-ECG_FILE = 'output_lv_ellipsoid/pseudo_ecg.csv'
+PV_FILE  = 'output_lv_ellipsoid_isovol_lagrange/pv_loop.csv'
+ECG_FILE = 'output_lv_ellipsoid_isovol_lagrange/pseudo_ecg.csv'
 POLL_INTERVAL = 2.0  # seconds between updates
 
 def load_csv(path):
