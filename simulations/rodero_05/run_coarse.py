@@ -18,6 +18,8 @@ import time
 
 import dolfin
 dolfin.PETScOptions.set("mat_mumps_icntl_4", "0")
+dolfin.parameters["reorder_dofs_serial"] = True
+dolfin.parameters["mesh_partitioner"] = "ParMETIS"  # instead of default "SCOTCH"
 import numpy as np
 import pandas as pd
 import pulse
@@ -77,7 +79,8 @@ from petsc4py import PETSc; logger.info(['PETSc:', PETSc.Sys.getVersion()])
 #             (for iterating on mechanics/cavity-constraint bugs quickly)
 # "archer2" : full-fidelity run — 3x EP refinement, real propagating
 #             activation from heart.endocardial-activation-times
-RUN_MODE = "local"  # "local" or "archer2"
+RUN_MODE = os.environ.get("RUN_MODE", "local")
+#RUN_MODE = "local"  # "local" or "archer2"
 assert RUN_MODE in ("local", "archer2")
 
 NUM_REFINEMENTS = 3 if RUN_MODE == "archer2" else 0
@@ -88,10 +91,11 @@ logger.info(f"RUN_MODE = {RUN_MODE}  "
 
 RESOLUTION = "4mm"
 MESH_DIR = "meshes/"
-RESULTS_DIR = f"results_{RESOLUTION}/"
 
+RUN_TAG = os.environ.get("RUN_TAG", "default")
+RESULTS_DIR = f"results_{RESOLUTION}/{RUN_TAG}/"
 # ── Warm start configuration ─────────────────────────────────────────────
-WARM_START_T_MS = 110  # e.g. 100.0 to restart from t=100ms, or None for fresh start
+WARM_START_T_MS = None #  110  # e.g. 100.0 to restart from t=100ms, or None for fresh start
 
 
 # ── Monkey-patch: normal-only Robin BC (frictionless contact) ───────────
