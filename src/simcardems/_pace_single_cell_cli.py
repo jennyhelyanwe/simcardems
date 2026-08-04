@@ -7,12 +7,13 @@ cannot handle a 1-cell mesh split across more ranks than it has cells.
 import argparse
 import json
 import sys
+import numpy as np
 
 import cbcbeat
 import dolfin
 
 from simcardems.models.fully_coupled_Tor_Land.cell_model import TorLandFull
-
+from simcardems.steady_state_cell_cache import CELLTYPE_NAMES
 
 class _StubCoupling:
     def __init__(self):
@@ -23,7 +24,7 @@ class _StubCoupling:
 
 def pace_one_celltype(cell_params, celltype, pcl, max_beats, tol, dt,
                        stim_amp=53.0, stim_duration=1.0):
-    import numpy as np
+    from tqdm import tqdm
 
     params = dict(cell_params)
     params["celltype"] = celltype
@@ -56,7 +57,8 @@ def pace_one_celltype(cell_params, celltype, pcl, max_beats, tol, dt,
     prev_ca_trace = prev_t_trace = None
     beats_used, final_delta = max_beats, float("nan")
 
-    for beat in range(max_beats):
+    pbar = tqdm(range(max_beats), desc=f"Pacing {CELLTYPE_NAMES.get(celltype, celltype)}", unit="beat")
+    for beat in pbar:
         t0, t1 = beat * pcl, (beat + 1) * pcl
         ca_trace, v_trace, xs_trace, t_trace = [], [], [], []
 
@@ -82,8 +84,10 @@ def pace_one_celltype(cell_params, celltype, pcl, max_beats, tol, dt,
                                            prev_t_trace - prev_t_trace[0], prev_ca_trace)
             ca_range = max(prev_ca_resampled.max() - prev_ca_resampled.min(), 1e-9)
             rel_diff = float(np.max(np.abs(ca_trace - prev_ca_resampled)) / ca_range)
-            print(f"[{celltype}] beat {beat+1}: Ca dev={rel_diff:.3e}", file=sys.stderr)
+            pbar.set_postfix({"Ca dev": f"{rel_diff:.2e}", "tol": f"{tol:.0e}"})
+
             if rel_diff < tol:
+                pbar.write(f"Converged at beat {beat + 1} (Ca dev={rel_diff:.3e})")
                 beats_used, final_delta = beat + 1, rel_diff
                 break
 
@@ -98,7 +102,6 @@ def pace_one_celltype(cell_params, celltype, pcl, max_beats, tol, dt,
         "last_beat_t": last_beat_t, "last_beat_v": last_beat_v,
         "last_beat_ca": last_beat_ca, "last_beat_xs": last_beat_xs,
     }
-
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()

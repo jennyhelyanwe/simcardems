@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 
 cache_dir = os.environ.get("FENICS_CACHE_DIR", os.path.expanduser("~/.cache"))
 os.environ["XDG_CACHE_HOME"] = cache_dir
@@ -37,6 +38,10 @@ from simcardems.biv_cavity_cycle_controller import (
     CycleParams,
     WindkesselParams,
     Phase,
+    compute_cavity_volume,
+    compute_target_pressure,
+    advance_phase,
+    commit_step,
 )
 from simcardems.postprocess import ecg_recovery
 from simcardems.geometry import refine_mesh, StimulusDomain
@@ -56,6 +61,178 @@ RESULTS_DIR = f"results_{RESOLUTION}/"
 
 # ── Warm start configuration ──────────────────────────────────────────────────
 WARM_START_T_MS = 110 # Set to e.g. 100.0 to restart from t=100ms, or None for fresh start
+
+# ── Cavity-volume constrained mechanics for IVC and IVR ────────────────────────────────────────────
+class CavityConstrainedMechanicsProblem(pulse.MechanicsProblem):
+    """
+    cavity_specs: {marker: v_target_Constant} — one entry per cavity
+    CURRENTLY being volume-constrained (gets its own Real multiplier).
+    Any Neumann/Robin BCs passed via `bcs` (e.g. a still-pressure-driven
+    RV, or the EPI Robin spring) are handled normally via _external_work.
+    """
+    def __init__(self, *args, cavity_specs=None, **kwargs):
+        if not cavity_specs:
+            raise ValueError("cavity_specs must have at least one {marker: v_target}")
+        self.cavity_specs = cavity_specs
+        super().__init__(*args, **kwargs)
+
+    def _init_spaces(self):
+        mesh = self.geometry.mesh
+        P2 = dolfin.VectorElement("Lagrange", mesh.ufl_cell(), 2)
+        P1 = dolfin.FiniteElement("Lagrange", mesh.ufl_cell(), 1)
+        R_elements = [dolfin.FiniteElement("Real", mesh.ufl_cell(), 0)
+                      for _ in self.cavity_specs]
+        self.state_space = dolfin.FunctionSpace(
+            mesh, dolfin.MixedElement([P2, P1] + R_elements)
+        )
+        self.state = dolfin.Function(self.state_space, name="state")
+        self.state_test = dolfin.TestFunction(self.state_space)
+
+    def _init_forms(self):
+        parts = dolfin.split(self.state)
+        test_parts = dolfin.split(self.state_test)
+        u, p = parts[0], parts[1]
+        v, q = test_parts[0], test_parts[1]
+        P_cavities = parts[2:]
+        P_cavity_tests = test_parts[2:]
+        markers = list(self.cavity_specs.keys())
+
+        F = dolfin.variable(kinematics.DeformationGradient(u))
+        J = kinematics.Jacobian(F)
+        mesh = self.geometry.mesh
+        dx = self.geometry.dx
+        ds = self.geometry.ds
+        N = self.geometry.facet_normal
+
+        internal_energy = self.material.strain_energy(F) + self.material.compressibility(p, J)
+        self._virtual_work = dolfin.derivative(internal_energy * dx, self.state, self.state_test)
+
+        if self.strong_coupling:
+            f0 = self.material.active.f0
+            f = F * f0
+            valve_mask = getattr(self.geometry, "valve_mask", None)
+            if valve_mask is not None:
+                myocardium = 1.0 - valve_mask
+                Pa_frozen = myocardium * self.material.active.Ta_current * dolfin.outer(f, f0)
+            else:
+                Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
+            self._virtual_work += dolfin.inner(Pa_frozen, dolfin.grad(v)) * dx
+
+        external_work = self._external_work(u, v)
+        if external_work is not None:
+            self._virtual_work += external_work
+
+        x = dolfin.SpatialCoordinate(mesh) + u
+        n_weighted = ufl.cofac(F) * N
+        cavity_integrand = -dolfin.dot(x, n_weighted) / 3.0
+        total_ref_volume = dolfin.assemble(dolfin.Constant(1.0) * dx)
+
+        cavity_energy = 0
+        for marker, P_c in zip(markers, P_cavities):
+            v_target = self.cavity_specs[marker]
+            cavity_energy += -P_c * cavity_integrand * ds(marker)
+            cavity_energy += (P_c * v_target / total_ref_volume) * dx
+        self._virtual_work += dolfin.derivative(cavity_energy, self.state, self.state_test)
+
+        self._dirichlet_bc = []
+        self._set_dirichlet_bc()
+        self._jacobian = dolfin.derivative(
+            self._virtual_work, self.state, dolfin.TrialFunction(self.state_space)
+        )
+        self._init_solver()
+
+    @property
+    def strong_coupling(self):
+        return hasattr(self.material.active, "Ta")
+
+    def solve(self):
+        nliter, nlconv = self._raw_solve()
+        self._update_active_stress_bookkeeping()
+        return nliter, nlconv
+
+    def _raw_solve(self):
+        return super().solve()
+
+    def _update_active_stress_bookkeeping(self, update_ta_current=True):
+        if self.strong_coupling:
+            active = self.material.active
+            u = self.state.split(deepcopy=True)[0]
+            F = dolfin.grad(u) + dolfin.Identity(3)
+            f = F * active.f0
+            lmbda = dolfin.sqrt(f ** 2)
+            active._projector.project(active.lmbda, lmbda)
+            if active.dt > 0:
+                active._projector.project(active._dLambda,
+                                           (lmbda - active.lmbda_prev) / active.dt)
+            if update_ta_current:
+                active._projector.project(active.Ta_current, active.Ta(lmbda))
+            active.update_current(lmbda=lmbda)
+            active.update_prev()
+
+    def get_cavity_pressure(self, marker):
+        idx = list(self.cavity_specs.keys()).index(marker)
+        return self.state.split(deepcopy=True)[2 + idx].vector().get_local()[0]
+
+class DualCavityModeManager:
+    """
+    Tracks, independently, whether LV and RV are each currently
+    volume-constrained (isovolumic) or pressure-driven, builds/caches
+    the appropriate MechanicsProblem variant for the current combination,
+    and hands off (u, p) state whenever the combination changes.
+    """
+    def __init__(self, base_mech_problem, biv_geo, material,
+                 lv_marker, rv_marker, lv_pressure_const, rv_pressure_const,
+                 valve_stiffness_scale=None):
+        self.base_problem = base_mech_problem  # your existing mech_problem, unchanged
+        self.geometry = biv_geo
+        self.material = material
+        self.lv_marker = lv_marker
+        self.rv_marker = rv_marker
+        self.lv_pressure_const = lv_pressure_const
+        self.rv_pressure_const = rv_pressure_const
+        self.lv_v_target = dolfin.Constant(0.0)
+        self.rv_v_target = dolfin.Constant(0.0)
+        self._cache = {}  # (lv_cavity: bool, rv_cavity: bool) -> problem instance
+        self._current_key = (False, False)
+        self._current_problem = base_mech_problem
+
+    def _build_problem(self, lv_cavity, rv_cavity):
+        cavity_specs = {}
+        if lv_cavity:
+            cavity_specs[self.lv_marker] = self.lv_v_target
+        if rv_cavity:
+            cavity_specs[self.rv_marker] = self.rv_v_target
+
+        neumann = []
+        if not lv_cavity:
+            neumann.append(pulse.NeumannBC(traction=self.lv_pressure_const, marker=self.lv_marker))
+        if not rv_cavity:
+            neumann.append(pulse.NeumannBC(traction=self.rv_pressure_const, marker=self.rv_marker))
+        robin = list(self.base_problem.bcs.robin)  # reuse EPI spring etc. unchanged
+        bcs = pulse.BoundaryConditions(neumann=neumann, robin=robin, dirichlet=[])
+
+        return CavityConstrainedMechanicsProblem(
+            self.geometry, self.material, bcs, cavity_specs=cavity_specs,
+        )
+
+    def get_problem(self, lv_cavity, rv_cavity):
+        key = (lv_cavity, rv_cavity)
+        if key == (False, False):
+            problem = self.base_problem
+        elif key not in self._cache:
+            problem = self._build_problem(lv_cavity, rv_cavity)
+            self._cache[key] = problem
+        else:
+            problem = self._cache[key]
+
+        if key != self._current_key:
+            # Hand off (u, p) from whichever problem was active to the new one
+            handoff_uP(self._current_problem, problem)
+            self._current_key = key
+            self._current_problem = problem
+            logger.info(f"  [cavity manager] switched mode: LV_cavity={lv_cavity}, RV_cavity={rv_cavity}")
+
+        return problem
 
 # ── PseudoECG ──────────────────────────────────────────────────────────────────
 
@@ -133,106 +310,140 @@ class BiVCycleRunner(Runner):
             self._pv_file = None
 
     def _solve_mechanics(self):
+        n_substeps = 0
         self.coupling.coupling_to_mechanics()
         import time
         t0 = time.time()
 
-        phase = self._cycle_controller.lv_state.phase
-        if phase == Phase.ISOVOL_CONTRACTION:
-            target_vol_lv = self._cycle_controller.lv_state.end_dia_vol
-            target_vol_rv = self._cycle_controller.rv_state.end_dia_vol
-            logger.info(f"  [isovol] phase=ISOVOL_CONTRACTION, targeting end-diastolic volumes")
-        elif phase == Phase.ISOVOL_RELAXATION:
-            target_vol_lv = self._cycle_controller.lv_state.end_sys_vol
-            target_vol_rv = self._cycle_controller.rv_state.end_sys_vol
-            logger.info(f"  [isovol] phase=ISOVOL_RELAXATION, targeting end-systolic volumes")
-        else:
-            target_vol_lv = target_vol_rv = None
+        lv_state = self._cycle_controller.lv_state
+        rv_state = self._cycle_controller.rv_state
+        isovol_phases = (Phase.ISOVOL_CONTRACTION, Phase.ISOVOL_RELAXATION)
+        lv_isovol = lv_state.phase in isovol_phases
+        rv_isovol = rv_state.phase in isovol_phases
 
-        if target_vol_lv is not None:
-            self.coupling.solve_mechanics()
-            converged, n_it = converge_isovolumic_pressure(
-                self.coupling.solve_mechanics, biv_geo,
-                self._lv_pressure_const, self._rv_pressure_const,
-                target_vol_lv, target_vol_rv, self._mech_problem,
-            )
-            logger.info(f"  Isovolumic pressure convergence: converged={converged} in {n_it} iters")
+        t_ms = TimeStepper.ns2ms(self.t)
+        dt_ms = self._config.dt
+
+        logger.info(f"  [dual-cavity] t={t_ms:.2f}ms  LV_phase={lv_state.phase} "
+                    f"(isovol={lv_isovol})  RV_phase={rv_state.phase} (isovol={rv_isovol})")
+
+        active_problem = self._cavity_manager.get_problem(lv_isovol, rv_isovol)
+        logger.info(f"  [dual-cavity] using problem key={self._cavity_manager._current_key} "
+                    f"(is_base_problem={active_problem is self._cavity_manager.base_problem})")
+
+        if lv_isovol:
+            target = lv_state.end_dia_vol if lv_state.phase == Phase.ISOVOL_CONTRACTION else lv_state.end_sys_vol
+            self._cavity_manager.lv_v_target.assign(target)
+            logger.info(f"  [dual-cavity] LV target_vol={target:.1f} mm^3 (Lagrange multiplier mode)")
+        if rv_isovol:
+            target = rv_state.end_dia_vol if rv_state.phase == Phase.ISOVOL_CONTRACTION else rv_state.end_sys_vol
+            self._cavity_manager.rv_v_target.assign(target)
+            logger.info(f"  [dual-cavity] RV target_vol={target:.1f} mm^3 (Lagrange multiplier mode)")
+
+        if not lv_isovol:
+            u_now = active_problem.state.split(deepcopy=True)[0]
+            v_lv_now = compute_cavity_volume(self._cycle_controller.geometry, u_now,
+                                             self._cycle_controller.lv_marker)
+            p_lv_target = compute_target_pressure(lv_state, v_lv_now, t_ms, dt_ms)
+            self._lv_pressure_const.assign(p_lv_target)
+            logger.info(f"  [dual-cavity] LV pressure-driven: v_lv_now={v_lv_now:.1f}, "
+                        f"p_lv_target={p_lv_target:.4f} kPa (Neumann BC mode)")
+        if not rv_isovol:
+            u_now = active_problem.state.split(deepcopy=True)[0]
+            v_rv_now = compute_cavity_volume(self._cycle_controller.geometry, u_now,
+                                             self._cycle_controller.rv_marker)
+            p_rv_target = compute_target_pressure(rv_state, v_rv_now, t_ms, dt_ms)
+            self._rv_pressure_const.assign(p_rv_target)
+            logger.info(f"  [dual-cavity] RV pressure-driven: v_rv_now={v_rv_now:.1f}, "
+                        f"p_rv_target={p_rv_target:.4f} kPa (Neumann BC mode)")
+
+        if lv_isovol or rv_isovol:
+            n_substeps = solve_cavity_with_ta_ramp(active_problem)
+            logger.info(f"  [dual-cavity] cavity-constrained solve done, {n_substeps} total Ta-ramp substeps")
+            u_final, _, _, _ = active_problem.state.split(deepcopy=True)
+            logger.info('got u_final')
         else:
-            self.coupling.solve_mechanics()
+            active_problem.solve()
+            logger.info(f"  [dual-cavity] plain pressure-driven solve done")
+            u_final = active_problem.state.split(deepcopy=True)[0]
+
+        self.coupling.interpolate(self.coupling.lmbda_mech, self.coupling.lmbda_ep)
+
+        v_lv_final = compute_cavity_volume(self._cycle_controller.geometry, u_final,
+                                           self._cycle_controller.lv_marker)
+        v_rv_final = compute_cavity_volume(self._cycle_controller.geometry, u_final,
+                                           self._cycle_controller.rv_marker)
+        p_lv_final = (active_problem.get_cavity_pressure(self._cycle_controller.lv_marker)
+                      if lv_isovol else float(self._lv_pressure_const))
+        p_rv_final = (active_problem.get_cavity_pressure(self._cycle_controller.rv_marker)
+                      if rv_isovol else float(self._rv_pressure_const))
+
+        logger.info(f"  [dual-cavity] FINAL this step: LV p={p_lv_final:.4f} kPa v={v_lv_final:.1f} mm^3  |  "
+                    f"RV p={p_rv_final:.4f} kPa v={v_rv_final:.1f} mm^3")
+
+        commit_step(lv_state, v_lv_final, p_lv_final)
+        commit_step(rv_state, v_rv_final, p_rv_final)
+        lv_state.end_dia_vol = v_lv_final
+        rv_state.end_dia_vol = v_rv_final
+
+        lv_phase_before = lv_state.phase
+        rv_phase_before = rv_state.phase
+        advance_phase(lv_state, t_ms, dt_ms)
+        advance_phase(rv_state, t_ms, dt_ms)
+
+        if lv_state.phase != lv_phase_before:
+            logger.info(f"  [dual-cavity] *** LV PHASE TRANSITION: {lv_phase_before} -> {lv_state.phase} *** "
+                        f"(pressure_n={lv_state.pressure_n:.4f}, wdk_pressure_n={lv_state.wdk_pressure_n:.4f})")
+        if rv_state.phase != rv_phase_before:
+            logger.info(f"  [dual-cavity] *** RV PHASE TRANSITION: {rv_phase_before} -> {rv_state.phase} *** "
+                        f"(pressure_n={rv_state.pressure_n:.4f}, wdk_pressure_n={rv_state.wdk_pressure_n:.4f})")
 
         self.coupling.update_prev_mechanics()
         self.coupling.mechanics_to_coupling()
         self.coupling.coupling_to_ep()
 
-        t_ms = TimeStepper.ns2ms(self.t)
-        dt_ms = self._config.dt
-
-        p_lv_before_step = float(self._lv_pressure_const)
-        p_rv_before_step = float(self._rv_pressure_const)
-
-        self._cycle_controller.step(problem=self._mech_problem, t=t_ms, dt=dt_ms)
-
-        p_lv_after_step = float(self._lv_pressure_const)
-        p_rv_after_step = float(self._rv_pressure_const)
-        logger.info(f"  [isovol] post-step() correction: "
-                    f"Δp_lv={p_lv_after_step - p_lv_before_step:+.4f}, "
-                    f"Δp_rv={p_rv_after_step - p_rv_before_step:+.4f} "
-                    f"(should be small if secant loop converged well)")
-
-        self._cycle_controller.step(
-            problem=self._mech_problem,
-            t=t_ms,
-            dt=dt_ms,
-        )
-
-        apply_phase_dt(self._config, self._cycle_controller.lv_state.phase,
-                       time_stepper=self._time_stepper, logger=logger)
+        apply_phase_dt(self._config, lv_state.phase, time_stepper=self._time_stepper, logger=logger)
 
         t1 = time.time()
         logger.debug(f"  Mechanics solve time: {t1 - t0:.2f}s")
-        lv = self._cycle_controller.lv_state
-        rv = self._cycle_controller.rv_state
-
         logger.debug(
             f"  → t={t_ms:.1f} ms"
-            f"  LV phase={lv.phase}  LVP={lv.pressure_n:.3f} kPa  LVV={lv.volume_n/1000:.2f} mL"
-            f"  RV phase={rv.phase}  RVP={rv.pressure_n:.3f} kPa  RVV={rv.volume_n/1000:.2f} mL"
+            f"  LV phase={lv_state.phase}  LVP={lv_state.pressure_n:.3f} kPa  LVV={lv_state.volume_n / 1000:.2f} mL"
+            f"  RV phase={rv_state.phase}  RVP={rv_state.pressure_n:.3f} kPa  RVV={rv_state.volume_n / 1000:.2f} mL"
         )
-        t_ms = TimeStepper.ns2ms(self.t)
-        if (t_ms - self._last_warm_start_t) >= (self._warm_start_freq - 1e-10):
-            checkpoint_name = f"warm_start_{int(t_ms):04d}ms"
+
+        t_ms_now = TimeStepper.ns2ms(self.t)
+        if (t_ms_now - self._last_warm_start_t) >= (self._warm_start_freq - 1e-10):
+            checkpoint_name = f"warm_start_{int(t_ms_now):04d}ms"
             with dolfin.HDF5File(dolfin.MPI.comm_world, os.path.join(self._outdir, f"{checkpoint_name}.h5"), "w") as f:
                 f.write(self.coupling.ep_solver.vs, "/ep/vs")
                 f.write(self.coupling.mech_solver.state, "/mechanics/state")
                 f.write(self.coupling.lmbda_mech, "/em/lmbda_prev")
                 f.write(self.coupling.Zetas_mech, "/em/Zetas_prev")
                 f.write(self.coupling.Zetaw_mech, "/em/Zetaw_prev")
-
             if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
                 import json
                 with open(os.path.join(self._outdir, f"{checkpoint_name}.json"), "w") as f:
                     json.dump({
-                        "t_ms": TimeStepper.ns2ms(self.t),
-                        "lv": {k: v for k, v in dataclasses.asdict(self._cycle_controller.lv_state).items() if
-                               not isinstance(v, dict)},
-                        "rv": {k: v for k, v in dataclasses.asdict(self._cycle_controller.rv_state).items() if
-                               not isinstance(v, dict)},
+                        "t_ms": t_ms_now,
+                        "lv": {k: v for k, v in dataclasses.asdict(lv_state).items() if not isinstance(v, dict)},
+                        "rv": {k: v for k, v in dataclasses.asdict(rv_state).items() if not isinstance(v, dict)},
                     }, f, indent=2)
-            self._last_warm_start_t = t_ms
+            self._last_warm_start_t = t_ms_now
 
         if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0 and self._pv_file is not None:
             self._pv_file.write(
-                f"{t_ms:.3f},{lv.pressure_n:.6f},{lv.volume_n:.6f},"
-                f"{rv.pressure_n:.6f},{rv.volume_n:.6f},"
-                f"{lv.phase},{rv.phase}\n"
+                f"{t_ms_now:.3f},{lv_state.pressure_n:.6f},{lv_state.volume_n:.6f},"
+                f"{rv_state.pressure_n:.6f},{rv_state.volume_n:.6f},"
+                f"{lv_state.phase},{rv_state.phase}\n"
             )
             self._pv_file.flush()
 
-        if self._pseudo_ecg is not None and t_ms - self._last_ecg_t >= self._dt_ecg - 1e-10:
+        if self._pseudo_ecg is not None and t_ms_now - self._last_ecg_t >= self._dt_ecg - 1e-10:
             self.coupling.assigners.assign_ep()
             v_fn = self.coupling.assigners.functions["ep"]["V"]
-            self._pseudo_ecg.compute(v_fn, t_ms)
-            self._last_ecg_t = t_ms
+            self._pseudo_ecg.compute(v_fn, t_ms_now)
+            self._last_ecg_t = t_ms_now
 
     def close_files(self):
         if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0 and self._pv_file is not None:
@@ -240,7 +451,7 @@ class BiVCycleRunner(Runner):
         if self._pseudo_ecg is not None:
             self._pseudo_ecg.close()
 
-
+# ── Santiy checks ──────────────
 def check_orthonormality(f0, s0, n0, label=""):
     def as_array(x):
         if hasattr(x, "vector"):
@@ -260,8 +471,18 @@ def check_orthonormality(f0, s0, n0, label=""):
     logger.info(f"{label} f0 norm: {f0n.min():.6f}-{f0n.max():.6f}, "
           f"max|f0.s0|={dot_fs.max():.3e}, max|f0.n0|={dot_fn.max():.3e}, max|s0.n0|={dot_sn.max():.3e}")
 
+def get_real_space_value(fn):
+    """Safely extract the single global scalar value of a Real-space
+    Function under MPI — exactly one rank owns the DOF locally; every
+    other rank has an empty local array. Summing local contributions
+    across ranks (only one is ever nonzero) via MPI.sum gives a
+    consistent, correct value on every rank."""
+    local = fn.vector().get_local()
+    local_val = float(local[0]) if len(local) > 0 else 0.0
+    comm = fn.function_space().mesh().mpi_comm()
+    return dolfin.MPI.sum(comm, local_val)
 
-# ── Phase-dependent dt/dt_mech ──────────────
+# ── Phase-dependent time steps dt/dt_mech ──────────────
 def dt_targets_for_phase(phase):
     """Returns the intended (dt, dt_mech) in ms for a given cardiac phase.
     Edit values HERE ONLY — both the pre-loop setup and the in-loop
@@ -270,8 +491,7 @@ def dt_targets_for_phase(phase):
     if phase == Phase.PRELOAD:
         return dict(dt=10.0, dt_mech=10.0)
     else:
-        return dict(dt=0.5, dt_mech=1.0)
-
+        return dict(dt=0.1, dt_mech=5)
 
 def apply_phase_dt(config, phase, time_stepper=None, logger=None):
     """Applies dt_targets_for_phase(phase) to config, and — if a live
@@ -415,76 +635,258 @@ logger.debug(f"f0.s0 range on 4mm mesh: {dot_fs.min():.6f} to {dot_fs.max():.6f}
 logger.debug(f"Number of cells with |f0.s0| > 0.5: {np.sum(np.abs(dot_fs) > 0.5)}")
 
 # ---- Volume convergence in IVC ---
-def converge_isovolumic_pressure(solve_mechanics_fn, biv_geo,
-                                   lv_pressure_const, rv_pressure_const,
-                                   target_vol_lv, target_vol_rv,
-                                   mech_problem, max_iters=3, tol_vol=300.0):
+# ── Lagrange-multiplier cavity-constrained mechanics ────────────────────
+class CavityConstrainedMechanicsProblem(pulse.MechanicsProblem):
     """
-    Secant iteration within a single timestep: adjust LV/RV pressure until
-    resulting cavity volumes match target_vol_lv/rv (mm^3), exploiting the
-    near-linear P-V relationship over one small step. Returns (converged, n_iters).
+    cavity_specs: {marker: v_target_Constant} — one entry per cavity
+    CURRENTLY being volume-constrained (gets its own Real multiplier).
+    Neumann/Robin BCs passed via `bcs` (e.g. a still-pressure-driven RV,
+    or the EPI Robin spring) are handled normally via _external_work.
     """
-    def get_volumes():
-        u_now, _ = mech_problem.state.split(deepcopy=True)
-        v_lv = pulse.dolfin_utils.get_cavity_volume(biv_geo, chamber="lv", u=u_now)
-        v_rv = pulse.dolfin_utils.get_cavity_volume(biv_geo, chamber="rv", u=u_now)
-        return v_lv, v_rv
+    def __init__(self, *args, cavity_specs=None, **kwargs):
+        if not cavity_specs:
+            raise ValueError("cavity_specs must have at least one {marker: v_target}")
+        self.cavity_specs = cavity_specs
+        super().__init__(*args, **kwargs)
 
-    p_lv, p_rv = float(lv_pressure_const), float(rv_pressure_const)
-    v_lv, v_rv = get_volumes()
-    err_lv, err_rv = v_lv - target_vol_lv, v_rv - target_vol_rv
+    def _init_spaces(self):
+        mesh = self.geometry.mesh
+        P2 = dolfin.VectorElement("Lagrange", mesh.ufl_cell(), 2)
+        P1 = dolfin.FiniteElement("Lagrange", mesh.ufl_cell(), 1)
+        R_elements = [dolfin.FiniteElement("Real", mesh.ufl_cell(), 0)
+                      for _ in self.cavity_specs]
+        self.state_space = dolfin.FunctionSpace(
+            mesh, dolfin.MixedElement([P2, P1] + R_elements)
+        )
+        self.state = dolfin.Function(self.state_space, name="state")
+        self.state_test = dolfin.TestFunction(self.state_space)
 
-    logger.info(f"    [isovol converge] target: LV={target_vol_lv:.1f}mm^3 RV={target_vol_rv:.1f}mm^3")
-    logger.info(f"    [isovol converge] start:  p_lv={p_lv:.4f} v_lv={v_lv:.1f} err_lv={err_lv:+.1f}  |  "
-                f"p_rv={p_rv:.4f} v_rv={v_rv:.1f} err_rv={err_rv:+.1f}")
+    def _init_forms(self):
+        parts = dolfin.split(self.state)
+        test_parts = dolfin.split(self.state_test)
+        u, p = parts[0], parts[1]
+        v, q = test_parts[0], test_parts[1]
+        P_cavities = parts[2:]
+        markers = list(self.cavity_specs.keys())
 
-    p_lv_prev, err_lv_prev = p_lv, err_lv
-    p_rv_prev, err_rv_prev = p_rv, err_rv
+        F = dolfin.variable(_kinematics.DeformationGradient(u))
+        J = _kinematics.Jacobian(F)
+        mesh = self.geometry.mesh
+        dx = self.geometry.dx
+        ds = self.geometry.ds
+        N = self.geometry.facet_normal
 
-    for it in range(max_iters):
-        if abs(err_lv) < tol_vol and abs(err_rv) < tol_vol:
-            logger.info(f"    [isovol converge] CONVERGED after {it} correction(s) "
-                        f"(|err_lv|={abs(err_lv):.1f} < {tol_vol}, |err_rv|={abs(err_rv):.1f} < {tol_vol})")
-            return True, it
+        internal_energy = self.material.strain_energy(F) + self.material.compressibility(p, J)
+        self._virtual_work = dolfin.derivative(internal_energy * dx, self.state, self.state_test)
 
-        if it == 0:
-            dp_lv = max(0.01, 0.05 * abs(p_lv))
-            dp_rv = max(0.01, 0.05 * abs(p_rv))
-            p_lv_trial = p_lv + np.sign(err_lv) * dp_lv if err_lv != 0 else p_lv
-            p_rv_trial = p_rv + np.sign(err_rv) * dp_rv if err_rv != 0 else p_rv
-            logger.info(f"    [isovol converge] iter {it}: no slope history yet, "
-                        f"perturbing p_lv {p_lv:.4f}->{p_lv_trial:.4f}, "
-                        f"p_rv {p_rv:.4f}->{p_rv_trial:.4f}")
+        if self.strong_coupling:
+            f0 = self.material.active.f0
+            f = F * f0
+            valve_mask = getattr(self.geometry, "valve_mask", None)
+            if valve_mask is not None:
+                myocardium = 1.0 - valve_mask
+                Pa_frozen = myocardium * self.material.active.Ta_current * dolfin.outer(f, f0)
+            else:
+                Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
+            self._virtual_work += dolfin.inner(Pa_frozen, dolfin.grad(v)) * dx
+
+        external_work = self._external_work(u, v)
+        if external_work is not None:
+            self._virtual_work += external_work
+
+        x = dolfin.SpatialCoordinate(mesh) + u
+        n_weighted = _ufl.cofac(F) * N
+        cavity_integrand = -dolfin.dot(x, n_weighted) / 3.0
+        total_ref_volume = dolfin.assemble(dolfin.Constant(1.0) * dx)
+
+        cavity_energy = 0
+        for marker, P_c in zip(markers, P_cavities):
+            v_target = self.cavity_specs[marker]
+            cavity_energy += -P_c * cavity_integrand * ds(marker)
+            cavity_energy += (P_c * v_target / total_ref_volume) * dx
+        self._virtual_work += dolfin.derivative(cavity_energy, self.state, self.state_test)
+
+        self._dirichlet_bc = []
+        self._set_dirichlet_bc()
+        self._jacobian = dolfin.derivative(
+            self._virtual_work, self.state, dolfin.TrialFunction(self.state_space)
+        )
+        self._init_solver()
+
+    @property
+    def strong_coupling(self):
+        return hasattr(self.material.active, "Ta")
+
+    def solve(self):
+        nliter, nlconv = self._raw_solve()
+        self._update_active_stress_bookkeeping()
+        return nliter, nlconv
+
+    def _raw_solve(self):
+        return super().solve()
+
+    def _update_active_stress_bookkeeping(self, update_ta_current=True):
+        if self.strong_coupling:
+            active = self.material.active
+            u = self.state.split(deepcopy=True)[0]
+            F = dolfin.grad(u) + dolfin.Identity(3)
+            f = F * active.f0
+            lmbda = dolfin.sqrt(f ** 2)
+            active._projector.project(active.lmbda, lmbda)
+            if active.dt > 0:
+                active._projector.project(active._dLambda,
+                                           (lmbda - active.lmbda_prev) / active.dt)
+            if update_ta_current:
+                active._projector.project(active.Ta_current, active.Ta(lmbda))
+            active.update_current(lmbda=lmbda)
+            active.update_prev()
+
+    def get_cavity_pressure(self, marker):
+        idx = list(self.cavity_specs.keys()).index(marker)
+        P_fn = self.state.split(deepcopy=True)[2 + idx]
+        return get_real_space_value(P_fn)
+
+def handoff_uP(source_problem, dest_problem):
+    """Copy (u, p) from source_problem.state into dest_problem.state's
+    corresponding sub-blocks — works regardless of extra P_lv/P_rv blocks
+    on either side, since we only ever touch sub(0)/sub(1)."""
+    parts = source_problem.state.split(deepcopy=True)
+    u_src, p_src = parts[0], parts[1]
+    dolfin.assign(dest_problem.state.sub(0), u_src)
+    dolfin.assign(dest_problem.state.sub(1), p_src)
+
+
+def _compute_ta_target(cavity_problem):
+    """What Ta would be right now, using the last-solved displacement and
+    freshly-interpolated XS_mech/XW_mech — the aiming point for the ramp."""
+    active = cavity_problem.material.active
+    u = cavity_problem.state.split(deepcopy=True)[0]
+    F = dolfin.grad(u) + dolfin.Identity(3)
+    f = F * active.f0
+    lmbda_expr = dolfin.sqrt(f ** 2)
+    scratch = dolfin.Function(active.Ta_current.function_space())
+    active._projector.project(scratch, active.Ta(lmbda_expr))
+    return scratch.vector().get_local().copy()
+
+
+def solve_cavity_with_ta_ramp(cavity_problem, max_ta_step=2.0, max_step_doublings=6):
+    """Ramp Ta_current toward the EP-driven target, then reconcile against
+    the lambda the ramp actually produced (see conversation history for
+    the full reasoning behind the two-pass design)."""
+    active = cavity_problem.material.active
+
+    def _ramp_to(target_vals, label):
+        Ta_start = active.Ta_current.vector().get_local().copy()
+        diff = target_vals - Ta_start
+        max_jump = np.abs(diff).max()
+        n_steps = max(1, int(np.ceil(max_jump / max_ta_step)))
+
+        logger.info(f"  [Ta ramp:{label}] Ta_start_max={Ta_start.max():.4f}, "
+                    f"Ta_target_max={target_vals.max():.4f}, max_jump={max_jump:.4f}, "
+                    f"planned n_steps={n_steps}")
+
+        for attempt in range(max_step_doublings + 1):
+            alpha_vals = np.linspace(0.0, 1.0, n_steps + 1)[1:]
+            ok = True
+            for i, alpha in enumerate(alpha_vals):
+                trial_vals = Ta_start + alpha * diff
+                active.Ta_current.vector().set_local(trial_vals)
+                active.Ta_current.vector().apply("insert")
+                logger.info(f"    [Ta ramp:{label}] substep {i+1}/{len(alpha_vals)} "
+                            f"(alpha={alpha:.3f}): trial_Ta_max={trial_vals.max():.4f}")
+                try:
+                    nliter, nlconv = cavity_problem._raw_solve()
+                    if not nlconv or nliter > 6:
+                        ok = False
+                        logger.info(f"    [Ta ramp:{label}] substep {i+1} failed/marginal "
+                                    f"(nlconv={nlconv}, nliter={nliter})")
+                        break
+                    logger.info(f"    [Ta ramp:{label}] substep {i+1} converged in {nliter} iters")
+                except RuntimeError:
+                    ok = False
+                    logger.info(f"    [Ta ramp:{label}] substep {i+1} raised RuntimeError")
+                    break
+            if ok:
+                break
+            logger.info(f"  [Ta ramp:{label}] failed/marginal at n_steps={n_steps} "
+                        f"(max_jump={max_jump:.3f}), doubling to {n_steps * 2}")
+            n_steps *= 2
         else:
-            slope_lv = (err_lv - err_lv_prev) / (p_lv - p_lv_prev) if p_lv != p_lv_prev else None
-            slope_rv = (err_rv - err_rv_prev) / (p_rv - p_rv_prev) if p_rv != p_rv_prev else None
-            p_lv_trial = (p_lv - err_lv / slope_lv) if slope_lv and abs(slope_lv) > 1e-9 else p_lv
-            p_rv_trial = (p_rv - err_rv / slope_rv) if slope_rv and abs(slope_rv) > 1e-9 else p_rv
-            logger.info(f"    [isovol converge] iter {it}: slope_lv={slope_lv}, slope_rv={slope_rv}")
-            logger.info(f"    [isovol converge] iter {it}: secant update "
-                        f"p_lv {p_lv:.4f}->{p_lv_trial:.4f}, p_rv {p_rv:.4f}->{p_rv_trial:.4f}")
+            raise RuntimeError(f"[Ta ramp:{label}] failed even at {n_steps} substeps")
 
-        lv_pressure_const.assign(p_lv_trial)
-        rv_pressure_const.assign(p_rv_trial)
-        solve_mechanics_fn()
+        logger.info(f"  [Ta ramp:{label}] max_jump={max_jump:.3f}, used {n_steps} substep(s)")
+        return n_steps
 
-        p_lv_prev, err_lv_prev = p_lv, err_lv
-        p_rv_prev, err_rv_prev = p_rv, err_rv
-        p_lv, p_rv = p_lv_trial, p_rv_trial
+    Ta_target = _compute_ta_target(cavity_problem)
+    n_steps_main = _ramp_to(Ta_target, "main")
 
-        v_lv, v_rv = get_volumes()
-        err_lv, err_rv = v_lv - target_vol_lv, v_rv - target_vol_rv
+    cavity_problem._update_active_stress_bookkeeping(update_ta_current=False)
+    Ta_consistent = _compute_ta_target(cavity_problem)
+    n_steps_correction = _ramp_to(Ta_consistent, "consistency")
 
-        logger.info(f"    [isovol converge] iter {it} result: "
-                    f"v_lv={v_lv:.1f} err_lv={err_lv:+.1f}  |  v_rv={v_rv:.1f} err_rv={err_rv:+.1f}")
-
-    converged = abs(err_lv) < tol_vol and abs(err_rv) < tol_vol
-    logger.info(f"    [isovol converge] {'CONVERGED' if converged else 'DID NOT CONVERGE'} "
-                f"after max_iters={max_iters} "
-                f"(final |err_lv|={abs(err_lv):.1f}, |err_rv|={abs(err_rv):.1f}, tol={tol_vol})")
-    return converged, max_iters
+    cavity_problem._update_active_stress_bookkeeping(update_ta_current=False)
+    total_steps = n_steps_main + n_steps_correction
+    logger.info(f"  [Ta ramp] total substeps this macro step: {total_steps} "
+                f"(main={n_steps_main}, consistency={n_steps_correction})")
+    return total_steps
 
 
+class DualCavityModeManager:
+    """Tracks, independently, whether LV and RV are each currently
+    volume-constrained (isovolumic) or pressure-driven, builds/caches the
+    appropriate MechanicsProblem variant for the current combination, and
+    hands off (u, p) state whenever the combination changes."""
+    def __init__(self, base_mech_problem, biv_geo, material,
+                 lv_marker, rv_marker, lv_pressure_const, rv_pressure_const):
+        self.base_problem = base_mech_problem
+        self.geometry = biv_geo
+        self.material = material
+        self.lv_marker = lv_marker
+        self.rv_marker = rv_marker
+        self.lv_pressure_const = lv_pressure_const
+        self.rv_pressure_const = rv_pressure_const
+        self.lv_v_target = dolfin.Constant(0.0)
+        self.rv_v_target = dolfin.Constant(0.0)
+        self._cache = {}
+        self._current_key = (False, False)
+        self._current_problem = base_mech_problem
+
+    def _build_problem(self, lv_cavity, rv_cavity):
+        cavity_specs = {}
+        if lv_cavity:
+            cavity_specs[self.lv_marker] = self.lv_v_target
+        if rv_cavity:
+            cavity_specs[self.rv_marker] = self.rv_v_target
+
+        neumann = []
+        if not lv_cavity:
+            neumann.append(pulse.NeumannBC(traction=self.lv_pressure_const, marker=self.lv_marker))
+        if not rv_cavity:
+            neumann.append(pulse.NeumannBC(traction=self.rv_pressure_const, marker=self.rv_marker))
+        robin = list(self.base_problem.bcs.robin)
+        bcs = pulse.BoundaryConditions(neumann=neumann, robin=robin, dirichlet=[])
+
+        return CavityConstrainedMechanicsProblem(
+            self.geometry, self.material, bcs, cavity_specs=cavity_specs,
+        )
+
+    def get_problem(self, lv_cavity, rv_cavity):
+        key = (lv_cavity, rv_cavity)
+        if key == (False, False):
+            problem = self.base_problem
+        elif key not in self._cache:
+            problem = self._build_problem(lv_cavity, rv_cavity)
+            self._cache[key] = problem
+        else:
+            problem = self._cache[key]
+
+        if key != self._current_key:
+            handoff_uP(self._current_problem, problem)
+            self._current_key = key
+            self._current_problem = problem
+            logger.info(f"  [cavity manager] switched mode: LV_cavity={lv_cavity}, RV_cavity={rv_cavity}")
+
+        return problem
 # ── 2. Activation times ────────────────────────────────────────────────────────
 
 logger.info('Load activation times...')
@@ -508,7 +910,7 @@ act_fn = interpolate_activation_to_ep_mesh(
 
 UNIFORM_ACTIVATION_TEST = True
 if UNIFORM_ACTIVATION_TEST:
-    act_fn.vector()[:] = 120
+    act_fn.vector()[:] = 110
     logger.info("DEBUG: uniform activation override — every node activates at t=120 ms")
 
     # Also widen the stimulus domain to the WHOLE mesh, not just the
@@ -536,10 +938,21 @@ whole_mesh_marker = dolfin.MeshFunction(
 biv_geo.stimulus_domain = StimulusDomain(domain=whole_mesh_marker, marker=1)
 ####
 
+# ── Load cache or pace cells to steady state ──────────────
+from simcardems.steady_state_cell_cache import load_steady_state_cache, apply_celltype_aware_initial_conditions
+
+CELL_PARAMS_OVERRIDE = {}
+PCL = 800.0
+
+steady_state = load_steady_state_cache(CELL_PARAMS_OVERRIDE, PCL, max_beats=300)
+
+cell_init_file = steady_state["cell_init_files"][0]  # endo, matching your original default
+
 # ── 4. Config ──────────────────────────────────────────────────────────────────
 
 logger.info('Configuring...')
 config = Config()
+config.cell_init_file = cell_init_file
 config.T = 800.0
 config.dt = 10.0
 config.dt_mech = 10.0
@@ -609,8 +1022,6 @@ cell_fn = map_dense_field_to_dg0_function(
 logger.info('Load sf IKs...')
 iks_values = load_dense_node_field(MESH_DIR + "rodero_05_fine_nodefield_sf_IKs.csv")
 iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
-
-
 
 # ── 6. EM coupling ─────────────────────────────────────────────────────────────
 # ── Parameter summary: print everything that affects the solve, up front ──
@@ -702,6 +1113,10 @@ coupling = em_model.setup_EM_model_from_config(
 
 mech_problem = coupling.mech_solver
 
+from simcardems.models.fully_coupled_Tor_Land.cell_model import TorLandFull
+state_names = list(TorLandFull.default_initial_conditions().keys())
+
+apply_celltype_aware_initial_conditions(coupling, cell_fn, steady_state["cell_init_files"], state_names)
 
 # ── Option to fix the apex for easier mechanics convergence ──────────────────────────────────
 APPLY_APEX_PIN = False
@@ -822,6 +1237,10 @@ cycle_controller = BiVCycleController(
 
 u0, _ = mech_problem.state.split(deepcopy=True)
 cycle_controller.initialize(u0)
+cavity_manager = DualCavityModeManager(
+    mech_problem, biv_geo, mech_problem.material,
+    LV_ENDO_MARKER, RV_ENDO_MARKER, lv_pressure_const, rv_pressure_const,
+)
 logger.debug(f"Initial LV volume: {lv_state.volume_n:.2f}")
 logger.debug(f"Initial RV volume: {rv_state.volume_n:.2f}")
 
@@ -879,6 +1298,7 @@ runner.set_cycle_controller(
     pseudo_ecg=pseudo_ecg, dt_ecg=5.0,
     warm_start_freq=5.0, t_restart=t_restart,
 )
+runner._cavity_manager = cavity_manager
 
 if WARM_START_T_MS is not None:
     warm_start_name = f"warm_start_{int(WARM_START_T_MS):04d}ms"
