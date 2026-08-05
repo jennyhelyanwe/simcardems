@@ -18,8 +18,6 @@ import time
 
 import dolfin
 dolfin.PETScOptions.set("mat_mumps_icntl_4", "0")
-dolfin.parameters["reorder_dofs_serial"] = True
-dolfin.parameters["mesh_partitioner"] = "ParMETIS"  # instead of default "SCOTCH"
 import numpy as np
 import pandas as pd
 import pulse
@@ -143,6 +141,8 @@ class CavityConstrainedMechanicsProblem(pulse.MechanicsProblem):
         if not cavity_specs:
             raise ValueError("cavity_specs must have at least one {marker: v_target}")
         self.cavity_specs = cavity_specs
+        self._u_standalone = None
+        self._u_assigner = None
         super().__init__(*args, **kwargs)
 
     def _init_spaces(self):
@@ -224,7 +224,7 @@ class CavityConstrainedMechanicsProblem(pulse.MechanicsProblem):
     def _update_active_stress_bookkeeping(self, update_ta_current=True):
         if self.strong_coupling:
             active = self.material.active
-            u = self.state.split(deepcopy=True)[0]
+            u = get_u_view(self)
             F = dolfin.grad(u) + dolfin.Identity(3)
             f = F * active.f0
             lmbda = dolfin.sqrt(f ** 2)
@@ -239,25 +239,37 @@ class CavityConstrainedMechanicsProblem(pulse.MechanicsProblem):
 
     def get_cavity_pressure(self, marker):
         idx = list(self.cavity_specs.keys()).index(marker)
-        P_fn = self.state.split(deepcopy=True)[2 + idx]
-        return get_real_space_value(P_fn)
+        sub_idx = 2 + idx
+        V = self.state_space
+        dofs = V.sub(sub_idx).dofmap().dofs()  # global indices; empty on ranks that don't own this Real dof
+        local_val = float(self.state.vector().get_local(dofs)[0]) if len(dofs) > 0 else 0.0
+        comm = self.geometry.mesh.mpi_comm()
+        return dolfin.MPI.sum(comm, local_val)
 
+def get_u_view(problem):
+    if getattr(problem, '_u_standalone', None) is None:
+        V_full = problem.state_space
+        mesh = V_full.mesh()
+        P2 = V_full.ufl_element().sub_elements()[0]
+        V_u = dolfin.FunctionSpace(mesh, P2)
+        problem._u_standalone = dolfin.Function(V_u)
+        problem._u_assigner = dolfin.FunctionAssigner(V_u, V_full.sub(0))
+    problem._u_assigner.assign(problem._u_standalone, problem.state.sub(0))
+    return problem._u_standalone
 
 def handoff_uP(source_problem, dest_problem):
-    """Copy (u, p) from source_problem.state into dest_problem.state's
-    corresponding sub-blocks — works regardless of extra P_lv/P_rv blocks
-    on either side, since we only ever touch sub(0)/sub(1)."""
-    parts = source_problem.state.split(deepcopy=True)
-    u_src, p_src = parts[0], parts[1]
-    dolfin.assign(dest_problem.state.sub(0), u_src)
-    dolfin.assign(dest_problem.state.sub(1), p_src)
-
+    """Copy (u, p) between mixed states via FunctionAssigner on
+    non-collapsed .sub(i) views — never .split(deepcopy=True)."""
+    assigner_u = dolfin.FunctionAssigner(dest_problem.state_space.sub(0), source_problem.state_space.sub(0))
+    assigner_u.assign(dest_problem.state.sub(0), source_problem.state.sub(0))
+    assigner_p = dolfin.FunctionAssigner(dest_problem.state_space.sub(1), source_problem.state_space.sub(1))
+    assigner_p.assign(dest_problem.state.sub(1), source_problem.state.sub(1))
 
 def _compute_ta_target(cavity_problem):
     """What Ta would be right now, using the last-solved displacement and
     freshly-interpolated XS_mech/XW_mech — the aiming point for the ramp."""
     active = cavity_problem.material.active
-    u = cavity_problem.state.split(deepcopy=True)[0]
+    u = get_u_view(cavity_problem)
     F = dolfin.grad(u) + dolfin.Identity(3)
     f = F * active.f0
     lmbda_expr = dolfin.sqrt(f ** 2)
@@ -486,7 +498,7 @@ class BiVCycleRunner(Runner):
             logger.info(f"  [dual-cavity] RV target_vol={target:.1f} mm^3 (Lagrange multiplier mode)")
 
         if not lv_isovol:
-            u_now = active_problem.state.split(deepcopy=True)[0]
+            u_now = get_u_view(active_problem)
             v_lv_now = compute_cavity_volume(self._cycle_controller.geometry, u_now,
                                               self._cycle_controller.lv_marker)
             p_lv_target = compute_target_pressure(lv_state, v_lv_now, t_ms, dt_ms)
@@ -494,7 +506,7 @@ class BiVCycleRunner(Runner):
             logger.info(f"  [dual-cavity] LV pressure-driven: v_lv_now={v_lv_now:.1f}, "
                         f"p_lv_target={p_lv_target:.4f} kPa (Neumann BC mode)")
         if not rv_isovol:
-            u_now = active_problem.state.split(deepcopy=True)[0]
+            u_now = get_u_view(active_problem)
             v_rv_now = compute_cavity_volume(self._cycle_controller.geometry, u_now,
                                               self._cycle_controller.rv_marker)
             p_rv_target = compute_target_pressure(rv_state, v_rv_now, t_ms, dt_ms)
@@ -508,7 +520,7 @@ class BiVCycleRunner(Runner):
         else:
             active_problem.solve()
             logger.info(f"  [dual-cavity] plain pressure-driven solve done")
-        u_final = active_problem.state.split(deepcopy=True)[0]
+        u_final = get_u_view(active_problem)
 
         self.coupling.interpolate(self.coupling.lmbda_mech, self.coupling.lmbda_ep)
 
@@ -617,18 +629,6 @@ def check_orthonormality(f0, s0, n0, label=""):
     dot_sn = np.abs(np.sum(S * N, axis=1))
     logger.info(f"{label} f0 norm: {f0n.min():.6f}-{f0n.max():.6f}, "
                 f"max|f0.s0|={dot_fs.max():.3e}, max|f0.n0|={dot_fn.max():.3e}, max|s0.n0|={dot_sn.max():.3e}")
-
-
-def get_real_space_value(fn):
-    """Safely extract the single global scalar value of a Real-space
-    Function under MPI — exactly one rank owns the DOF locally; every
-    other rank has an empty local array. Summing local contributions
-    across ranks (only one is ever nonzero) via MPI.sum gives a
-    consistent, correct value on every rank."""
-    local = fn.vector().get_local()
-    local_val = float(local[0]) if len(local) > 0 else 0.0
-    comm = fn.function_space().mesh().mpi_comm()
-    return dolfin.MPI.sum(comm, local_val)
 
 
 def tet_volumes(coords, cells_arr):
@@ -985,7 +985,7 @@ cycle_controller = BiVCycleController(
     geometry=biv_geo, lv_marker=LV_ENDO_MARKER, rv_marker=RV_ENDO_MARKER,
 )
 
-u0, _ = mech_problem.state.split(deepcopy=True)
+u0 = get_u_view(mech_problem)
 cycle_controller.initialize(u0)
 cavity_manager = DualCavityModeManager(
     mech_problem, biv_geo, mech_problem.material,
@@ -1042,6 +1042,36 @@ runner.set_cycle_controller(
     warm_start_freq=5.0, t_restart=t_restart,
 )
 runner._cavity_manager = cavity_manager
+
+logger.info("Eagerly constructing all cavity-mode problem variants...")
+for lv_c in (False, True):
+    for rv_c in (False, True):
+        if (lv_c, rv_c) == (False, False):
+            continue
+        logger.info(f"  building variant LV_cavity={lv_c}, RV_cavity={rv_c}...")
+        problem = cavity_manager.get_problem(lv_c, rv_c)
+
+        logger.info(f"  reading cavity pressure WITHOUT split() for LV_cavity={lv_c}, RV_cavity={rv_c}...")
+        marker = LV_ENDO_MARKER if lv_c else RV_ENDO_MARKER
+        p_val = problem.get_cavity_pressure(marker)
+        logger.info(f"  got p_val={p_val} — no crash!")
+
+        logger.info(f"  reading displacement via get_u_view for LV_cavity={lv_c}, RV_cavity={rv_c}...")
+        u_view = get_u_view(problem)
+        u_max = u_view.vector().norm("linf")
+        logger.info(f"  got u_view, ||u||_inf={u_max} — no crash!")
+
+        logger.info(f"  testing handoff_uP FROM base_problem TO this variant...")
+        handoff_uP(cavity_manager.base_problem, problem)
+        logger.info(f"  handoff succeeded — no crash!")
+
+        cavity_manager._current_key = (False, False)
+        cavity_manager._current_problem = cavity_manager.base_problem
+
+        logger.info(f"  testing REVERSE handoff_uP FROM this variant BACK TO base_problem...")
+        handoff_uP(problem, cavity_manager.base_problem)
+        logger.info(f"  reverse handoff succeeded — no crash!")
+logger.info("All cavity-mode variants built, pressure-read, u-viewed, and handoff-tested successfully.")
 
 if WARM_START_T_MS is not None:
     warm_start_name = f"warm_start_{int(WARM_START_T_MS):04d}ms"
