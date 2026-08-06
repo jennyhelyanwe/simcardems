@@ -13,6 +13,9 @@ to the real 3D EP mesh.
 import json
 import hashlib
 from pathlib import Path
+from simcardems import utils
+
+logger = utils.getLogger(__name__)
 
 import dolfin
 
@@ -107,6 +110,7 @@ def load_steady_state_cache(cell_params: dict, pcl: float, max_beats: int = 300,
             f"    python3 pace_and_cache_steady_state.py "
             f"--pcl {pcl} --max-beats {max_beats} --tol {tol} --dt {dt}\n"
         )
+    logger.info(f"[steady_state] Loaded cache (key={key}) from {run_dir}")
 
     return {
         "cell_init_files": {ct: str(p) for ct, p in state_paths.items()},

@@ -1,15 +1,12 @@
 import os
-from copy import deepcopy
 
-cache_dir = os.environ.get("FENICS_CACHE_DIR", os.path.expanduser("~/.cache"))
+cache_dir = os.environ.get("FENICS_CACHE_DIR", os.path.expanduser("./.cache"))
 os.environ["XDG_CACHE_HOME"] = cache_dir
 
 import logging
 logging.getLogger("simcardems.newton_solver").setLevel(logging.DEBUG)
 logging.getLogger("simcardems.biv_cavity_cycle_controller").setLevel(logging.INFO)
 logging.getLogger("simcardems.runner").setLevel(logging.DEBUG)
-logging.getLogger("simcardems.models.fully_coupled_Tor_Land.active_model").setLevel(logging.INFO)
-logging.getLogger("simcardems.models.fully_coupled_Tor_Land.em_model").setLevel(logging.DEBUG)
 logging.getLogger("__main__").setLevel(logging.DEBUG)
 
 import dataclasses
@@ -18,6 +15,7 @@ import time
 
 import dolfin
 dolfin.PETScOptions.set("mat_mumps_icntl_4", "0")
+dolfin.PETScOptions.set("snes_monitor")  # per-Newton-iteration residual printout for cavity-constrained solves
 import numpy as np
 import pandas as pd
 import pulse
@@ -78,11 +76,11 @@ from petsc4py import PETSc; logger.info(['PETSc:', PETSc.Sys.getVersion()])
 # "archer2" : full-fidelity run — 3x EP refinement, real propagating
 #             activation from heart.endocardial-activation-times
 RUN_MODE = os.environ.get("RUN_MODE", "local")
-#RUN_MODE = "local"  # "local" or "archer2"
 assert RUN_MODE in ("local", "archer2")
 
 NUM_REFINEMENTS = 3 if RUN_MODE == "archer2" else 0
 UNIFORM_ACTIVATION_TEST = (RUN_MODE == "local")
+END_TIME_MS = float(os.environ.get("END_TIME_MS", "800.0"))
 
 logger.info(f"RUN_MODE = {RUN_MODE}  "
             f"(NUM_REFINEMENTS={NUM_REFINEMENTS}, UNIFORM_ACTIVATION_TEST={UNIFORM_ACTIVATION_TEST})")
@@ -92,8 +90,9 @@ MESH_DIR = "meshes/"
 
 RUN_TAG = os.environ.get("RUN_TAG", "default")
 RESULTS_DIR = f"results_{RESOLUTION}/{RUN_TAG}/"
+
 # ── Warm start configuration ─────────────────────────────────────────────
-WARM_START_T_MS = None #  110  # e.g. 100.0 to restart from t=100ms, or None for fresh start
+WARM_START_T_MS = None  # e.g. 100.0 to restart from t=100ms, or None for fresh start
 
 
 # ── Monkey-patch: normal-only Robin BC (frictionless contact) ───────────
@@ -222,31 +221,88 @@ class CavityConstrainedMechanicsProblem(pulse.MechanicsProblem):
         return super().solve()
 
     def _update_active_stress_bookkeeping(self, update_ta_current=True):
-        if self.strong_coupling:
-            active = self.material.active
-            u = get_u_view(self)
-            F = dolfin.grad(u) + dolfin.Identity(3)
-            f = F * active.f0
-            lmbda = dolfin.sqrt(f ** 2)
-            active._projector.project(active.lmbda, lmbda)
-            if active.dt > 0:
-                active._projector.project(active._dLambda,
-                                           (lmbda - active.lmbda_prev) / active.dt)
-            if update_ta_current:
-                active._projector.project(active.Ta_current, active.Ta(lmbda))
-            active.update_current(lmbda=lmbda)
-            active.update_prev()
+        if not self.strong_coupling:
+            return
+
+        active = self.material.active
+        logger.info(f"  [Zetas debug] active.t={active.t:.4f}, active._t_prev={active._t_prev:.4f}, "
+                    f"active.dt={active.dt:.6f}")
+
+        u = get_u_view(self)
+        F = dolfin.grad(u) + dolfin.Identity(3)
+        f = F * active.f0
+        lmbda = dolfin.sqrt(f ** 2)
+        active._projector.project(active.lmbda, lmbda)
+        if active.dt > 0:
+            active._projector.project(active._dLambda,
+                                       (lmbda - active.lmbda_prev) / active.dt)
+
+        if update_ta_current:
+            active._projector.project(active.Ta_current, active.Ta(lmbda))
+
+            # XS>=0, Zetas=Zetaw=0 have been empirically confirmed, and
+            # h_lambda>=0 by construction — so the TRUE pointwise Ta
+            # formula cannot go negative. Ta_current lives on continuous
+            # CG1 while XS_mech/XW_mech are DG0 (genuinely discontinuous
+            # between cells) — negative values here are L2-projection
+            # ringing, not real active tension. Clamp removes it.
+            ta_arr = active.Ta_current.vector().get_local()
+            ta_arr[ta_arr < 0.0] = 0.0
+
+            # Valve-plug cells: force contribution is already masked out
+            # via myocardium in Pa_frozen, but Ta_current itself isn't —
+            # zero it here too so it doesn't pollute ramp diagnostics.
+            valve_mask = getattr(self.geometry, "valve_mask", None)
+            if valve_mask is not None:
+                mask_arr = valve_mask.vector().get_local()
+                ta_arr[mask_arr > 0.5] = 0.0
+
+            active.Ta_current.vector().set_local(ta_arr)
+            active.Ta_current.vector().apply("insert")
+
+        active.update_current(lmbda=lmbda)
+        logger.info(f"  [Zetas debug] after update_current: Zetas_max={active._Zetas.vector().max():.6e}")
+        active.update_prev()
 
     def get_cavity_pressure(self, marker):
+        """Reads the Real-space cavity pressure via FunctionAssigner on the
+        non-collapsed .sub(sub_idx) view — same proven mechanism as
+        get_u_view. The dofmap().dofs() + get_local(dofs) approach tested
+        unreliable (silently returned 0.0 despite genuine convergence)."""
         idx = list(self.cavity_specs.keys()).index(marker)
         sub_idx = 2 + idx
-        V = self.state_space
-        dofs = V.sub(sub_idx).dofmap().dofs()  # global indices; empty on ranks that don't own this Real dof
-        local_val = float(self.state.vector().get_local(dofs)[0]) if len(dofs) > 0 else 0.0
+        if not hasattr(self, '_p_standalone'):
+            self._p_standalone = {}
+            self._p_assigner = {}
+        if idx not in self._p_standalone:
+            V_full = self.state_space
+            mesh = V_full.mesh()
+            R = V_full.ufl_element().sub_elements()[sub_idx]
+            V_r = dolfin.FunctionSpace(mesh, R)
+            self._p_standalone[idx] = dolfin.Function(V_r)
+            self._p_assigner[idx] = dolfin.FunctionAssigner(V_r, V_full.sub(sub_idx))
+
+        self._p_assigner[idx].assign(self._p_standalone[idx], self.state.sub(sub_idx))
+        local = self._p_standalone[idx].vector().get_local()
+        local_val = float(local[0]) if len(local) > 0 else 0.0
         comm = self.geometry.mesh.mpi_comm()
         return dolfin.MPI.sum(comm, local_val)
 
+    # def get_cavity_pressure(problem, marker):
+    #     idx = list(problem.cavity_specs.keys()).index(marker)
+    #     sub_idx = 2 + idx
+    #     parts = problem.state.split(deepcopy=True)
+    #     P_fn = parts[sub_idx]
+    #     local = P_fn.vector().get_local()
+    #     local_val = float(local[0]) if len(local) > 0 else 0.0
+    #     comm = problem.geometry.mesh.mpi_comm()
+    #     return dolfin.MPI.sum(comm, local_val)
+
+
 def get_u_view(problem):
+    """Split-free displacement extraction via FunctionAssigner on the
+    non-collapsed .sub(0) view. Never .split(deepcopy=True) — see
+    get_cavity_pressure docstring for why."""
     if getattr(problem, '_u_standalone', None) is None:
         V_full = problem.state_space
         mesh = V_full.mesh()
@@ -257,6 +313,7 @@ def get_u_view(problem):
     problem._u_assigner.assign(problem._u_standalone, problem.state.sub(0))
     return problem._u_standalone
 
+
 def handoff_uP(source_problem, dest_problem):
     """Copy (u, p) between mixed states via FunctionAssigner on
     non-collapsed .sub(i) views — never .split(deepcopy=True)."""
@@ -264,6 +321,20 @@ def handoff_uP(source_problem, dest_problem):
     assigner_u.assign(dest_problem.state.sub(0), source_problem.state.sub(0))
     assigner_p = dolfin.FunctionAssigner(dest_problem.state_space.sub(1), source_problem.state_space.sub(1))
     assigner_p.assign(dest_problem.state.sub(1), source_problem.state.sub(1))
+
+# def get_u_view(problem):
+#     """Original .split(deepcopy=True) version — for LOCAL, low-rank
+#     comparison against the split-free version only. Will trigger the
+#     SCOTCH reordering crash at high MPI rank counts."""
+#     u, p = problem.state.split(deepcopy=True)[:2]
+#     return u
+#
+#
+# def handoff_uP(source_problem, dest_problem):
+#     parts = source_problem.state.split(deepcopy=True)
+#     u_src, p_src = parts[0], parts[1]
+#     dolfin.assign(dest_problem.state.sub(0), u_src)
+#     dolfin.assign(dest_problem.state.sub(1), p_src)
 
 def _compute_ta_target(cavity_problem):
     """What Ta would be right now, using the last-solved displacement and
@@ -280,7 +351,7 @@ def _compute_ta_target(cavity_problem):
 
 def solve_cavity_with_ta_ramp(cavity_problem, max_ta_step=2.0, max_step_doublings=6):
     """Ramp Ta_current toward the EP-driven target, then reconcile against
-    the lambda the ramp actually produced."""
+    the lambda the ramp actually produced (main pass + consistency pass)."""
     active = cavity_problem.material.active
 
     def _ramp_to(target_vals, label):
@@ -307,6 +378,9 @@ def solve_cavity_with_ta_ramp(cavity_problem, max_ta_step=2.0, max_step_doubling
                         logger.info(f"    [Ta ramp:{label}] substep {i+1} failed/marginal "
                                     f"(nlconv={nlconv}, nliter={nliter})")
                         break
+                    logger.info(f"    [Ta ramp:{label}] substep {i+1} converged in {nliter} iters, "
+                                f"P_lv={cavity_problem.get_cavity_pressure(LV_ENDO_MARKER):.4f}, "
+                                f"P_rv={cavity_problem.get_cavity_pressure(RV_ENDO_MARKER):.4f}")
                 except RuntimeError:
                     ok = False
                     logger.info(f"    [Ta ramp:{label}] substep {i+1} raised RuntimeError")
@@ -334,6 +408,23 @@ def solve_cavity_with_ta_ramp(cavity_problem, max_ta_step=2.0, max_step_doubling
     logger.info(f"  [Ta ramp] total substeps this macro step: {total_steps} "
                 f"(main={n_steps_main}, consistency={n_steps_correction})")
     return total_steps
+
+
+def _cheap_ta_now(mech_problem):
+    """Ta computed from the shared active model's CURRENT XS/XW (fresh
+    every EP step) and LAST-SOLVED lambda (frozen until next mechanics
+    solve) — a pure EP-side quantity, no mechanics re-solve needed.
+    Returns a GLOBAL, MPI-reduced (min, max) — every rank must agree on
+    this value, since it feeds a branch decision gating a collective
+    solve; a bare local .max() causes ranks to disagree and deadlock."""
+    active = mech_problem.material.active
+    scratch = dolfin.Function(active.Ta_current.function_space())
+    active._projector.project(scratch, active.Ta(active.lmbda))
+    local_vals = scratch.vector().get_local()
+    local_max = float(local_vals.max()) if len(local_vals) > 0 else -1e30
+    local_min = float(local_vals.min()) if len(local_vals) > 0 else 1e30
+    comm = mech_problem.geometry.mesh.mpi_comm()
+    return dolfin.MPI.max(comm, local_max), dolfin.MPI.min(comm, local_min)
 
 
 class DualCavityModeManager:
@@ -373,6 +464,11 @@ class DualCavityModeManager:
 
         return CavityConstrainedMechanicsProblem(
             self.geometry, self.material, bcs, cavity_specs=cavity_specs,
+            solver_parameters={
+                "report": True,
+                "absolute_tolerance": 1e-5,
+                "relative_tolerance": 1e-5,
+            },
         )
 
     def get_problem(self, lv_cavity, rv_cavity):
@@ -444,6 +540,8 @@ class BiVCycleRunner(Runner):
         self._last_ecg_t = -dt_ecg
         self._warm_start_freq = warm_start_freq
         self._last_warm_start_t = -warm_start_freq
+        self._last_solved_ta_max = None
+        self.ta_trigger_threshold = 0.5  # kPa
 
         if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
             pv_path = os.path.join(outdir, "pv_loop.csv")
@@ -467,6 +565,30 @@ class BiVCycleRunner(Runner):
                     pseudo_ecg.open_file(ecg_path)
         else:
             self._pv_file = None
+
+    def _solve_mechanics_now(self) -> bool:
+        lv_state = self._cycle_controller.lv_state
+        rv_state = self._cycle_controller.rv_state
+        isovol_phases = (Phase.ISOVOL_CONTRACTION, Phase.ISOVOL_RELAXATION)
+        in_isovol = (lv_state.phase in isovol_phases) or (rv_state.phase in isovol_phases)
+
+        elapsed_trigger = self.coupling.dt_mechanics >= self._config.dt_mech
+
+        if not in_isovol:
+            return elapsed_trigger
+
+        ta_now_max, ta_now_min = _cheap_ta_now(self._mech_problem)
+        if self._last_solved_ta_max is None:
+            ta_trigger = True
+        else:
+            ta_trigger = abs(ta_now_max - self._last_solved_ta_max) > self.ta_trigger_threshold
+
+        triggered = elapsed_trigger or ta_trigger
+        if triggered:
+            logger.info(f"  [mechanics trigger] elapsed={elapsed_trigger}, ta_trigger={ta_trigger} "
+                        f"(ta_now_max={ta_now_max:.4f}, ta_now_min={ta_now_min:.4f}, "
+                        f"last_solved={self._last_solved_ta_max})")
+        return triggered
 
     def _solve_mechanics(self):
         self.coupling.coupling_to_mechanics()
@@ -520,6 +642,9 @@ class BiVCycleRunner(Runner):
         else:
             active_problem.solve()
             logger.info(f"  [dual-cavity] plain pressure-driven solve done")
+
+        self._last_solved_ta_max, last_ta_min = _cheap_ta_now(self._mech_problem)
+        logger.info(f"  [dual-cavity] post-solve Ta range: min={last_ta_min:.4f}, max={self._last_solved_ta_max:.4f}")
         u_final = get_u_view(active_problem)
 
         self.coupling.interpolate(self.coupling.lmbda_mech, self.coupling.lmbda_ep)
@@ -543,7 +668,7 @@ class BiVCycleRunner(Runner):
         # Confirm this is intentional — compute_target_pressure's own
         # PRELOAD branch already sets end_dia_vol correctly using
         # volume_iter_k; this looks like a leftover from earlier
-        # debugging rather than something we deliberately kept.
+        # debugging rather than something deliberately kept.
         lv_state.end_dia_vol = v_lv_final
         rv_state.end_dia_vol = v_rv_final
 
@@ -676,14 +801,16 @@ def tet_quality_ratios(coords, cells_arr):
 
 # ── Phase-dependent time steps dt/dt_mech ────────────────────────────────
 def dt_targets_for_phase(phase):
-    """Returns the intended (dt, dt_mech) in ms for a given cardiac phase.
-    Edit values HERE ONLY — both the pre-loop setup and the in-loop
+    """Edit values HERE ONLY — both the pre-loop setup and the in-loop
     phase-change check call this same function, so they can't drift
-    out of sync with each other."""
+    out of sync with each other. dt_mech is a CEILING during IVC/IVR
+    (Ta-triggered mechanics can solve more often, never less)."""
     if phase == Phase.PRELOAD:
         return dict(dt=10.0, dt_mech=10.0)
-    else:
-        return dict(dt=0.1, dt_mech=5)
+    elif phase == Phase.EJECTION:
+        return dict(dt=0.1, dt_mech=2.0)
+    else:  # ISOVOL_CONTRACTION, ISOVOL_RELAXATION, FILLING
+        return dict(dt=0.05, dt_mech=2.0)
 
 
 def apply_phase_dt(config, phase, time_stepper=None, logger=None):
@@ -814,7 +941,7 @@ cell_init_file = steady_state["cell_init_files"][0]  # endo, matching original d
 logger.info('Configuring...')
 config = Config()
 config.cell_init_file = cell_init_file
-config.T = 800.0
+config.T = END_TIME_MS
 config.dt = 10.0
 config.dt_mech = 10.0
 config.geometry_path = MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5"
@@ -1042,36 +1169,6 @@ runner.set_cycle_controller(
     warm_start_freq=5.0, t_restart=t_restart,
 )
 runner._cavity_manager = cavity_manager
-
-logger.info("Eagerly constructing all cavity-mode problem variants...")
-for lv_c in (False, True):
-    for rv_c in (False, True):
-        if (lv_c, rv_c) == (False, False):
-            continue
-        logger.info(f"  building variant LV_cavity={lv_c}, RV_cavity={rv_c}...")
-        problem = cavity_manager.get_problem(lv_c, rv_c)
-
-        logger.info(f"  reading cavity pressure WITHOUT split() for LV_cavity={lv_c}, RV_cavity={rv_c}...")
-        marker = LV_ENDO_MARKER if lv_c else RV_ENDO_MARKER
-        p_val = problem.get_cavity_pressure(marker)
-        logger.info(f"  got p_val={p_val} — no crash!")
-
-        logger.info(f"  reading displacement via get_u_view for LV_cavity={lv_c}, RV_cavity={rv_c}...")
-        u_view = get_u_view(problem)
-        u_max = u_view.vector().norm("linf")
-        logger.info(f"  got u_view, ||u||_inf={u_max} — no crash!")
-
-        logger.info(f"  testing handoff_uP FROM base_problem TO this variant...")
-        handoff_uP(cavity_manager.base_problem, problem)
-        logger.info(f"  handoff succeeded — no crash!")
-
-        cavity_manager._current_key = (False, False)
-        cavity_manager._current_problem = cavity_manager.base_problem
-
-        logger.info(f"  testing REVERSE handoff_uP FROM this variant BACK TO base_problem...")
-        handoff_uP(problem, cavity_manager.base_problem)
-        logger.info(f"  reverse handoff succeeded — no crash!")
-logger.info("All cavity-mode variants built, pressure-read, u-viewed, and handoff-tested successfully.")
 
 if WARM_START_T_MS is not None:
     warm_start_name = f"warm_start_{int(WARM_START_T_MS):04d}ms"

@@ -192,7 +192,7 @@ class Runner:
             lambda i, T, dt: i > 0 and T >= 40000 and i % int(10000 / dt) == 0
         ),
     ):
-        save_it = int(save_freq / self._dt)
+        self._last_saved_t = -save_freq
         self._setup_time_stepper(T, use_ns=True, st_progress=st_progress)
 
         pbar = create_progressbar(
@@ -218,9 +218,12 @@ class Runner:
                 logger.debug(f"Solve mechanics model at step {i}, t={TimeStepper.ns2ms(t):.2f} ms")
                 self._solve_mechanics()
 
-            # Store every 'save_freq' ms
-            if i % save_it == 0:
+            # Store every 'save_freq' ms — TIME-based, not step-count-based,
+            # so it stays correct even as dt changes mid-run (apply_phase_dt).
+            t_ms = TimeStepper.ns2ms(t)
+            if t_ms - self._last_saved_t >= save_freq - 1e-9:
                 self.store()
+                self._last_saved_t = t_ms
 
             # Save state every 10 beats if simulation is longer than 40 sec
             if default_save_condition(i, T, self._dt):

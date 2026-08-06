@@ -182,13 +182,7 @@ def compute_target_pressure(
     dvol = volume_iter_k - state.volume_n
     ddvol = dvol / dt
 
-    logger.info(f"  [wdk debug] compute_target_pressure ENTRY: phase={state.phase}, "
-                f"wdk_pressure_n BEFORE update={state.wdk_pressure_n:.4f}")
-
     wdk_pres = _update_windkessel(state, dvol if state.phase == Phase.EJECTION else 0.0, dt)
-
-    logger.info(f"  [wdk debug] _update_windkessel returned wdk_pres={wdk_pres:.4f} "
-                f"(phase={state.phase}, dvol={dvol:.4f}, dt={dt})")
 
     if state.phase == Phase.PRELOAD:
         if t <= p.t_zero:
