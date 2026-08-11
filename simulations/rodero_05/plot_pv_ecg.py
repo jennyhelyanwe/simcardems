@@ -4,8 +4,8 @@ import matplotlib.gridspec as gridspec
 import time
 import os
 
-PV_FILE  = 'results_4mm/biv_coarse_run_output/pv_loop.csv'
-ECG_FILE = 'results_4mm/biv_coarse_run_output/pseudo_ecg.csv'
+PV_FILE  = 'results_4mm/circulation_default/pv_loop.csv'
+ECG_FILE = 'results_4mm/circulation_default/pseudo_ecg.csv'
 POLL_INTERVAL = 2.0
 
 PHASE_NAMES = {0: 'Preload', 1: 'IVC', 2: 'Ejection', 3: 'IVR', 4: 'Filling'}
@@ -95,8 +95,8 @@ while True:
         lvv  = pv[:, 2]/1000
         rvp  = pv[:, 3]
         rvv  = pv[:, 4]/1000
-        lv_phase = pv[:, 5]
-        rv_phase = pv[:, 6]
+        #lv_phase = pv[:, 5]
+        #rv_phase = pv[:, 6]
 
         # LV PV loop
         ax_lv_pv.cla()
@@ -134,8 +134,8 @@ while True:
 
         # Phase traces
         ax_phase.cla()
-        ax_phase.step(t_ms, lv_phase, 'b-', where='post', linewidth=1.2, label='LV')
-        ax_phase.step(t_ms, rv_phase, 'g-', where='post', linewidth=1.2, label='RV')
+        #ax_phase.step(t_ms, lv_phase, 'b-', where='post', linewidth=1.2, label='LV')
+        #ax_phase.step(t_ms, rv_phase, 'g-', where='post', linewidth=1.2, label='RV')
         ax_phase.set_ylabel('Phase')
         ax_phase.set_xlabel('Time (ms)')
         ax_phase.set_title('Phase')
