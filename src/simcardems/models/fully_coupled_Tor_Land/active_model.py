@@ -27,7 +27,7 @@ class Scheme(str, Enum):
 
 def _Zeta(Zeta_prev, A, c, dLambda, dt, scheme: Scheme):
     if scheme == Scheme.analytic:
-        return Zeta_prev * dolfin.exp(-c * dt) + (A * dLambda / c * dt) * (1.0 - dolfin.exp(-c * dt))
+        return Zeta_prev * dolfin.exp(-c * dt) + (A * dLambda / c) * (1.0 - dolfin.exp(-c * dt))
 
     elif scheme == Scheme.bd:
         return Zeta_prev + A * dLambda / (1.0 + c * dt)

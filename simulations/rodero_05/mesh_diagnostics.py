@@ -15,11 +15,15 @@ def check_orthonormality(f0, s0, n0, label=""):
     logger.info(f"{label} f0 norm: {f0n.min():.6f}-{f0n.max():.6f}, "
                 f"max|f0.s0|={dot_fs.max():.3e}, max|f0.n0|={dot_fn.max():.3e}, max|s0.n0|={dot_sn.max():.3e}")
 
-
-def tet_volumes(coords, cells_arr):
+def tet_volumes(coords, cells_arr, signed=False):
     p0, p1, p2, p3 = (coords[cells_arr[:, i]] for i in range(4))
-    return np.abs(np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0))) / 6.0
+    vol = np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0)) / 6.0
+    return vol if signed else np.abs(vol)
 
+# def tet_volumes(coords, cells_arr):
+#     p0, p1, p2, p3 = (coords[cells_arr[:, i]] for i in range(4))
+#     return np.abs(np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0))) / 6.0
+#
 
 def tet_quality_ratios(coords, cells_arr):
     p0, p1, p2, p3 = (coords[cells_arr[:, i]] for i in range(4))

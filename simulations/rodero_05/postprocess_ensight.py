@@ -52,26 +52,26 @@ def cell_centres(coords, topo):
     return coords[topo].mean(axis=1)
 
 
-def load_field_h5py(h5file, group, field_name, time_str):
-    """Scalar per-cell field (e.g. lambda). No P2/vertex reordering
-    ambiguity here — plain per-cell mean over cell dofs — so raw h5py
-    reading is safe for this one."""
-    path = f'{group}/{field_name}/{time_str}'
-    with h5py.File(h5file, 'r') as f:
-        grp = f[path]
-        vector = grp['vector_0'][:]
-        cell_dofs = grp['cell_dofs'][:]
-        x_cell_dofs = grp['x_cell_dofs'][:]
-        n_cells = len(grp['cells'])
+def extract_scalar_cellmean(hdf5_in, scalar_fn, mesh, time_str, group, field_name, debug=False):
+    hdf5_in.read(scalar_fn, f'{group}/{field_name}/{time_str}')
+    raw_vec = scalar_fn.vector().get_local()
 
-    vals = np.zeros(n_cells)
-    for i in range(n_cells):
-        start = x_cell_dofs[i]
-        end = x_cell_dofs[i + 1] if i + 1 < len(x_cell_dofs) else len(cell_dofs)
-        dofs = cell_dofs[start:end]
-        vals[i] = vector[dofs].mean()
-    return vals
+    v2d = dolfin.vertex_to_dof_map(scalar_fn.function_space())
+    nodal_vals = raw_vec[v2d]
 
+    topo = mesh.cells()
+    cell_vals = nodal_vals[topo].mean(axis=1)
+
+    if debug:
+        n_expected = mesh.num_vertices()  # CG1: one dof per vertex
+        print(f"  [extract debug] group={group} field={field_name} t={time_str}: "
+              f"raw_vec len={len(raw_vec)} (expected {n_expected}), "
+              f"raw min/max={raw_vec.min():.4f}/{raw_vec.max():.4f}, "
+              f"v2d len={len(v2d)}, v2d min/max={v2d.min()}/{v2d.max()}, "
+              f"nodal min/max={nodal_vals.min():.4f}/{nodal_vals.max():.4f}, "
+              f"cell min/max={cell_vals.min():.4f}/{cell_vals.max():.4f}", flush=True)
+
+    return cell_vals
 
 def extract_u_p1(hdf5_in, u_disp, p1_to_p2, time_str):
     """Extract P2 displacement via dolfin's own HDF5 read (correctly
@@ -143,7 +143,22 @@ def write_vector_node_file(path, vals, desc):
                 f.write(f'{float(v[dim]):12.5e}\n')
 
 
-def write_case_file(path, geo_file, scalar_vars, vector_vars, times_float):
+def write_vector_element_file(path, vals, desc):
+    """Per-element (per-cell) vector — for DG0 fields like fiber
+    direction, distinct from write_vector_node_file (per-node, used
+    for u/P2 displacement)."""
+    with open(path, 'w') as f:
+        f.write(f'{desc}\n')
+        f.write('part\n')
+        f.write('         1\n')
+        f.write('tetra4\n')
+        for dim in range(3):
+            for v in vals:
+                f.write(f'{float(v[dim]):12.5e}\n')
+
+
+def write_case_file(path, geo_file, scalar_vars, vector_vars, times_float, vector_element_vars=None):
+    vector_element_vars = vector_element_vars or []
     with open(path, 'w') as f:
         f.write('FORMAT\ntype: ensight gold\n\n')
         f.write('GEOMETRY\n')
@@ -153,6 +168,8 @@ def write_case_file(path, geo_file, scalar_vars, vector_vars, times_float):
             f.write(f'scalar per element: 1 {name} {pattern}\n')
         for name, pattern in vector_vars:
             f.write(f'vector per node: 1 {name} {pattern}\n')
+        for name, pattern in vector_element_vars:
+            f.write(f'vector per element: 1 {name} {pattern}\n')
         f.write('\nTIME\n')
         f.write('time set: 1\n')
         f.write(f'number of steps: {len(times_float)}\n')
@@ -197,12 +214,28 @@ def convert(h5file, outdir, tv_file=None):
     u_disp = dolfin.Function(V_disp)
     hdf5_in = dolfin.HDF5File(mesh.mpi_comm(), h5file, 'r')
 
-    rprint('Loading EP mesh...')
+    # Scalar CG1 reader, mechanics mesh — reuses the SAME handle as u_disp,
+    # since both are tied to `mesh`'s communicator. Correct.
+    V_scalar_mech = dolfin.FunctionSpace(mesh, 'Lagrange', 1)
+    scalar_fn_mech = dolfin.Function(V_scalar_mech)
+
+    rprint('Loading EP mesh via dolfin (separate mesh object + separate HDF5File handle)...')
+    ep_mesh = dolfin.Mesh(dolfin.MPI.comm_self)
+    with dolfin.HDF5File(ep_mesh.mpi_comm(), h5file, 'r') as f:
+        f.read(ep_mesh, 'geometry/mesh/ep', False)
+    V_scalar_ep = dolfin.FunctionSpace(ep_mesh, 'Lagrange', 1)
+    scalar_fn_ep = dolfin.Function(V_scalar_ep)
+    # Separate handle, tied to ep_mesh's own communicator — using hdf5_in
+    # (tied to the mechanics mesh) for EP reads silently scrambled values
+    # with no error. This was the actual root cause of the "ep_on_mech
+    # chaotic" symptom found earlier.
+    hdf5_in_ep = dolfin.HDF5File(ep_mesh.mpi_comm(), h5file, 'r')
+
     ep_coords, ep_topo = load_mesh_h5py(h5file, 'ep')
     if RANK == 0:
         print(f'  EP: {len(ep_coords)} nodes, {len(ep_topo)} cells')
     mech_centres = cell_centres(p1_coords, p1_topo)
-    ep_centres = cell_centres(ep_coords, ep_topo)
+    ep_centres = cell_centres(ep_mesh.coordinates(), ep_mesh.cells())  # was: cell_centres(ep_coords, ep_topo)
 
     rprint('Building KD-tree (EP -> mechanics)...')
     tree = cKDTree(ep_centres)
@@ -236,10 +269,7 @@ def convert(h5file, outdir, tv_file=None):
 
     my_timestep_indices = my_share(range(len(all_time_strs)), RANK, SIZE)
 
-    # ── mech_u: vector per node, P2->P1 on mechanics mesh, via dolfin's
-    #    own HDF5 read (fixed — previously used a raw h5py extraction that
-    #    scrambled values at some nodes; confirmed via make_xdmffiles that
-    #    the underlying simulation data was correct all along) ──────────
+    # ── mech_u: vector per node, P2->P1 on mechanics mesh ─────────────────
     var_name = 'mech_u'
     pattern = f'{var_name}.****'
     rprint(f'Processing {var_name}...')
@@ -253,7 +283,7 @@ def convert(h5file, outdir, tv_file=None):
         write_vector_node_file(out_path, u_vals, var_name)
     vector_vars.append((var_name, pattern))
 
-    # ── Scalar mechanics fields (mechanics mesh only) ─────────────────────────
+    # ── Scalar mechanics fields (mechanics mesh only) ──────────────────────
     for field_name in mech_fields:
         var_name = f'mech_{field_name}'
         pattern = f'{var_name}.****'
@@ -262,7 +292,7 @@ def convert(h5file, outdir, tv_file=None):
             t_str = all_time_strs[i]
             out_path = os.path.join(outdir, f'{var_name}.{i+1:04d}')
             if t_str in mech_time_strs:
-                vals = load_field_h5py(h5file, 'mechanics', field_name, t_str)
+                vals = extract_scalar_cellmean(hdf5_in, scalar_fn_mech, mesh, t_str, 'mechanics', field_name)
             else:
                 vals = np.zeros(len(p1_topo))
             write_scalar_file(out_path, vals, var_name)
@@ -275,9 +305,9 @@ def convert(h5file, outdir, tv_file=None):
         rprint(f'Processing {var_name_ep} (native EP resolution)...')
         for i in my_timestep_indices:
             t_str = all_time_strs[i]
-            out_path = os.path.join(outdir, f'{var_name_ep}.{i+1:04d}')
+            out_path = os.path.join(outdir, f'{var_name_ep}.{i + 1:04d}')
             if t_str in ep_time_strs:
-                vals = load_field_h5py(h5file, 'ep', field_name, t_str)
+                vals = extract_scalar_cellmean(hdf5_in_ep, scalar_fn_ep, ep_mesh, t_str, 'ep', field_name)
             else:
                 vals = np.zeros(len(ep_topo))
             write_scalar_file(out_path, vals, var_name_ep)
@@ -290,14 +320,14 @@ def convert(h5file, outdir, tv_file=None):
             t_str = all_time_strs[i]
             out_path = os.path.join(outdir, f'{var_name_mech}.{i+1:04d}')
             if t_str in ep_time_strs:
-                ep_vals = load_field_h5py(h5file, 'ep', field_name, t_str)
+                ep_vals = extract_scalar_cellmean(hdf5_in_ep, scalar_fn_ep, ep_mesh, t_str, 'ep', field_name)
                 vals = ep_vals[ep_to_mech_idx]
             else:
                 vals = np.zeros(len(p1_topo))
             write_scalar_file(out_path, vals, var_name_mech)
         scalar_vars.append((var_name_mech, pattern_mech))
 
-    # ── Material labels (mechanics mesh only) ─────────────────────────────────
+    # ── Material labels (mechanics mesh only) ──────────────────────────────
     if tv_file and os.path.exists(tv_file):
         coarse_tv = np.load(tv_file)
         var_name = 'material_tv'
@@ -309,6 +339,7 @@ def convert(h5file, outdir, tv_file=None):
         scalar_vars.append((var_name, pattern))
 
     hdf5_in.close()
+    hdf5_in_ep.close()
 
     if _comm is not None:
         _comm.Barrier()  # make sure every rank's files exist before rank 0 writes the case file
@@ -327,8 +358,8 @@ def convert(h5file, outdir, tv_file=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--results', default='results_4mm/biv_coarse_run_output/results.h5')
-    parser.add_argument('--out', default='results_4mm/ensight')
+    parser.add_argument('--results', default='results_4mm/default/biv_coarse_run_output/results.h5')
+    parser.add_argument('--out', default='results_4mm/default/ensight')
     parser.add_argument('--tv', default='rodero_05_coarse_tv.npy', help='Path to coarse_tv.npy material labels')
     args = parser.parse_args()
     convert(args.results, args.out, args.tv)

@@ -177,6 +177,18 @@ def get_u_view(problem):
     problem._u_assigner.assign(problem._u_standalone, problem.state.sub(0))
     return problem._u_standalone
 
+def get_p_view(problem):
+    """Split-free extraction of the P1 incompressibility pressure field
+    (state.sub(1)) — same FunctionAssigner pattern as get_u_view."""
+    if getattr(problem, '_p_field_standalone', None) is None:
+        V_full = problem.state_space
+        P1 = V_full.ufl_element().sub_elements()[1]
+        V_p = dolfin.FunctionSpace(V_full.mesh(), P1)
+        problem._p_field_standalone = dolfin.Function(V_p)
+        problem._p_field_assigner = dolfin.FunctionAssigner(V_p, V_full.sub(1))
+    problem._p_field_assigner.assign(problem._p_field_standalone, problem.state.sub(1))
+    return problem._p_field_standalone
+
 
 def handoff_uP(source_problem, dest_problem):
     assigner_u = dolfin.FunctionAssigner(dest_problem.state_space.sub(0), source_problem.state_space.sub(0))
@@ -211,7 +223,7 @@ def _cheap_ta_now(mech_problem):
     return dolfin.MPI.max(comm, local_max), dolfin.MPI.min(comm, local_min)
 
 
-def solve_cavity_with_ta_ramp(cavity_manager, lv_cavity, rv_cavity, max_ta_step=2.0,
+def solve_cavity_with_ta_ramp(cavity_manager, lv_cavity, rv_cavity, max_ta_step=1.0,
                                max_step_doublings=6, coupling=None):
     problem = cavity_manager.get_problem(lv_cavity, rv_cavity)
     active = problem.material.active
@@ -272,6 +284,12 @@ def solve_cavity_with_ta_ramp(cavity_manager, lv_cavity, rv_cavity, max_ta_step=
     n_steps_main = _ramp_to(Ta_target, "main")
 
     problem._update_active_stress_bookkeeping()
+    zetas_max = dolfin.MPI.max(dolfin.MPI.comm_world, float(active._Zetas.vector().max()))
+    zetas_min = dolfin.MPI.min(dolfin.MPI.comm_world, float(active._Zetas.vector().min()))
+    zetaw_max = dolfin.MPI.max(dolfin.MPI.comm_world, float(active._Zetaw.vector().max()))
+    zetaw_min = dolfin.MPI.min(dolfin.MPI.comm_world, float(active._Zetaw.vector().min()))
+    logger.info(f"  [Zetas/Zetaw check] Zetas: min={zetas_min:.4f} max={zetas_max:.4f}, "
+                f"Zetaw: min={zetaw_min:.4f} max={zetaw_max:.4f}, active.dt={active.dt:.6f}")
     logger.info(f"  [Ta ramp] total substeps this macro step: {n_steps_main}")
     return n_steps_main, problem
 

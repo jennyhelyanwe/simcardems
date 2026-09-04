@@ -79,6 +79,37 @@ class LVCycleRunner(Runner):
             self._pv_file = None
             self._ecg_file = None
 
+    def close_files(self):
+        if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
+            if self._pv_file:
+                self._pv_file.close()
+            if self._ecg_file:
+                self._ecg_file.close()
+
+    def _export_strain_stress(self):
+        u, p = self._mech_problem.state.split(deepcopy=True)[:2]
+        material = self._mech_problem.material
+        active = material.active
+
+        F = dolfin.variable(dolfin.grad(u) + dolfin.Identity(3))
+        C = F.T * F
+        E = 0.5 * (C - dolfin.Identity(3))
+        P_passive = material.FirstPiolaStress(F, p)
+
+        f0 = active.f0
+        f = F * f0
+        P_active = active.Ta_current * dolfin.outer(f, f0)
+        P_total = P_passive + P_active
+
+        idx = 0
+        for i in range(3):
+            for j in range(3):
+                self.coupling._E_components[idx].assign(
+                    dolfin.project(E[i, j], self.coupling._E_components[idx].function_space()))
+                self.coupling._P_components[idx].assign(
+                    dolfin.project(P_total[i, j], self.coupling._P_components[idx].function_space()))
+                idx += 1
+
     def _solve_mechanics(self):
         self.coupling.coupling_to_mechanics()
         self.coupling.solve_mechanics()
@@ -86,15 +117,22 @@ class LVCycleRunner(Runner):
         self.coupling.mechanics_to_coupling()
         self.coupling.coupling_to_ep()
 
+        self._export_strain_stress()
+
         t_ms = TimeStepper.ns2ms(self.t)
         dt_ms = self._config.dt
-        self._cycle_controller.step(
-            problem=self._mech_problem,
-            t=t_ms,
-            dt=dt_ms,
-        )
+
+        from simcardems.biv_cavity_cycle_controller import compute_target_pressure, commit_step, advance_phase
 
         state = self._cycle_controller.lv_state
+        u, _ = self._mech_problem.state.split(deepcopy=True)
+        v_lv_now = compute_cavity_volume(self._cycle_controller.geometry, u, self._cycle_controller.lv_marker)
+        p_lv_target = compute_target_pressure(state, v_lv_now, t_ms, dt_ms)
+        self._cycle_controller.lv_pressure_constant.assign(p_lv_target)
+
+        commit_step(state, v_lv_now, p_lv_target)
+        advance_phase(state, t_ms, dt_ms)
+
         if dolfin.MPI.rank(dolfin.MPI.comm_world) == 0:
             from tqdm import tqdm
             tqdm.write(
@@ -261,7 +299,7 @@ lv_geo.stimulus_domain = StimulusDomain(domain=cell_domain, marker=1)
 
 mpi_print("Configuring...")
 config = Config()
-config.T              = 800.0
+config.T              = 100 #800.0
 config.dt      = 1.0
 config.mechanics_solve_strategy = "hybrid"
 config.dt_mech                  = 5.0
@@ -370,6 +408,7 @@ runner.set_cycle_controller(cycle_controller, mech_problem, config.outdir, pseud
 u0, _ = mech_problem.state.split(deepcopy=True)
 cycle_controller.initialize(u0)
 mpi_print(f"Initial LV volume: {lv_state.volume_n:.2f}")
+
 
 try:
     runner.solve(T=config.T, save_freq=config.save_freq, show_progress_bar=True)

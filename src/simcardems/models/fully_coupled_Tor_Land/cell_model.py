@@ -127,7 +127,7 @@ class TorLandFull(BaseCellModel):
                 ("Beta0", 2.3),
                 ("Beta1", -2.4),
                 ("Tot_A", 25),
-                ("Tref", 120),
+                ("Tref", 120), # 120
                 ("Trpn50", 0.35),
                 ("calib", 1),
                 ("cat50_ref", 0.805),

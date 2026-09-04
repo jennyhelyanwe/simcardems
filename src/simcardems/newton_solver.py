@@ -57,8 +57,11 @@ class MechanicsNewtonSolver(dolfin.NewtonSolver):
             self.parameters["lu_solver"]["verbose"] = True
             self.parameters["krylov_solver"]["monitor_convergence"] = True
             dolfin.PETScOptions.set("ksp_monitor_true_residual")
-        self.parameters["linear_solver"] = "gmres"
-        self.parameters["preconditioner"] = "hypre_amg"
+        # self.parameters["linear_solver"] = "gmres"
+        # self.parameters["preconditioner"] = "hypre_amg"
+        self.parameters["linear_solver"] = params.get("linear_solver", "gmres")
+        self.parameters["preconditioner"] = params.get("preconditioner", "hypre_amg")
+        self.linear_solver().set_from_options()
         self.linear_solver().set_from_options()
         self._residual_index = 0
         self._residuals = []

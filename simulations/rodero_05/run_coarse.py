@@ -87,10 +87,15 @@ coords = mesh.coordinates()
 cells_arr = mesh.cells()
 logger.info(f"Mesh: {mesh.num_vertices()} vertices, {mesh.num_cells()} cells")
 
-volumes = tet_volumes(coords, cells_arr)
-logger.debug(f"Cell volumes: min={volumes.min():.4f}, mean={volumes.mean():.4f}, max={volumes.max():.4f}")
-radii = tet_quality_ratios(coords, cells_arr)
-logger.debug(f"Inradius/circumradius: min={radii.min():.4f}, mean={radii.mean():.4f}")
+signed_vols = tet_volumes(coords, cells_arr, signed=True)
+n_negative = np.sum(signed_vols < 0)
+# n_zero = np.sum(np.abs(signed_vols) < 1e-10)
+# logger.info(f"Reference mesh: {n_negative} elements with NEGATIVE signed volume (inverted winding), "
+#             f"{n_zero} elements with ~ZERO volume (degenerate)")
+# if n_negative > 0:
+#     bad_idx = np.where(signed_vols < 0)[0]
+#     bad_centers = coords[cells_arr[bad_idx]].mean(axis=1)
+#     logger.info(f"First few inverted element centers:\n{bad_centers[:10]}")
 
 if NUM_REFINEMENTS > 1:
     ep_mesh = refine_mesh(geo.mesh, num_refinements=NUM_REFINEMENTS)
@@ -112,26 +117,45 @@ biv_geo.valve_mask = valve_fn
 check_orthonormality(biv_geo.f0, biv_geo.s0, biv_geo.n0)
 
 # ── 2. Activation times ───────────────────────────────────────────────────
-node_coords = pd.read_csv(MESH_DIR + "/rodero_05_fine_xyz.csv", header=None).to_numpy() * 10.0
-node_ids, activation_times, coords_subset = load_activation_times(MESH_DIR + "/heart.endocardial-activation-times", node_coords)
-activation_times = activation_times * 1000.0
 
-act_fn = interpolate_activation_to_ep_mesh(
-    ep_mesh=biv_geo.ep_mesh,
-    endo_marker_ep=[biv_geo.markers["ENDO_LV"][0], biv_geo.markers["ENDO_RV"][0]],
-    ffun_ep=biv_geo.ffun_ep, node_ids_mech=node_ids,
-    activation_times_mech=activation_times, coords_subset_mech=coords_subset,
-)
+# node_ids, activation_times, coords_subset = load_activation_times(MESH_DIR + "/heart.endocardial-activation-times", node_coords)
+# activation_times = activation_times * 1000.0
+#
+# act_fn = interpolate_activation_to_ep_mesh(
+#     ep_mesh=biv_geo.ep_mesh,
+#     endo_marker_ep=[biv_geo.markers["ENDO_LV"][0], biv_geo.markers["ENDO_RV"][0]],
+#     ffun_ep=biv_geo.ffun_ep, node_ids_mech=node_ids,
+#     activation_times_mech=activation_times, coords_subset_mech=coords_subset,
+# )
+#
+# if UNIFORM_ACTIVATION_TEST:
+#     act_fn.vector()[:] = 110
+#     whole_mesh_marker = dolfin.MeshFunction("size_t", biv_geo.ep_mesh, biv_geo.ep_mesh.topology().dim(), 1)
+#     biv_geo.stimulus_domain = StimulusDomain(domain=whole_mesh_marker, marker=1)
+# else:
+#     biv_geo.stimulus_domain = endocardial_stimulus_domain(
+#         mesh=biv_geo.ep_mesh, ffun=biv_geo.ffun_ep,
+#         endo_markers=[biv_geo.markers["ENDO_LV"][0], biv_geo.markers["ENDO_RV"][0]], layer_thickness=2,
+#     )
 
-if UNIFORM_ACTIVATION_TEST:
-    act_fn.vector()[:] = 110
-    whole_mesh_marker = dolfin.MeshFunction("size_t", biv_geo.ep_mesh, biv_geo.ep_mesh.topology().dim(), 1)
-    biv_geo.stimulus_domain = StimulusDomain(domain=whole_mesh_marker, marker=1)
-else:
-    biv_geo.stimulus_domain = endocardial_stimulus_domain(
-        mesh=biv_geo.ep_mesh, ffun=biv_geo.ffun_ep,
-        endo_markers=[biv_geo.markers["ENDO_LV"][0], biv_geo.markers["ENDO_RV"][0]], layer_thickness=2,
-    )
+# ── 2. Activation times — real per-node local activation map (coarse mesh) ──
+logger.info('Load local activation time map (coarse mesh)...')
+activation_df = pd.read_csv(MESH_DIR + "rodero_05_coarse_" + RESOLUTION + "_lat.csv")  # adjust filename
+node_ids_local = activation_df["node_id"].to_numpy()
+activation_times_local = activation_df["activation_time_ms"].to_numpy()
+
+order = np.argsort(node_ids_local)
+activation_times_sorted = activation_times_local[order]
+import h5py
+with h5py.File(MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5", "r") as f:
+    global_coords = f["mesh/coordinates"][:]  # adjust path once confirmed — GLOBAL, unpartitioned, identical on every rank
+
+coarse_coords_for_activation = global_coords[node_ids_local[order]]
+
+act_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, coarse_coords_for_activation, activation_times_sorted)
+
+whole_mesh_marker = dolfin.MeshFunction("size_t", biv_geo.ep_mesh, biv_geo.ep_mesh.topology().dim(), 1)
+biv_geo.stimulus_domain = StimulusDomain(domain=whole_mesh_marker, marker=1)
 
 # ── Steady-state cell model cache ─────────────────────────────────────────
 CELL_PARAMS_OVERRIDE = {}
@@ -150,23 +174,33 @@ config.outdir = RESULTS_DIR + "biv_coarse_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
 config.save_freq = 10
 config.linear_mechanics_solver = "mumps"
-config.spring = 50.0
+config.spring = 500.0
 config.traction = 0.005
 config.mechanics_use_custom_newton_solver = True
 config.mechanics_solve_strategy = "fixed"
 config.mech_threshold = 1.0
 config.relaxation_factor = 1.0
+# config.relaxation_factor = 0.2  # was 1.0 — full undamped step was overshooting
+                                  # into inverted elements on the very first solve
 
-material_params_override = dict(a=2.28, a_f=1.686, b=9.726, b_f=15.779, a_s=0.0, b_s=0.0, a_fs=0.0, b_fs=0.0)
+# material_params_override = dict(a=2.28, a_f=1.686, b=9.726, b_f=15.779, a_s=0.0, b_s=0.0, a_fs=0.0, b_fs=0.0)
 
+# material_params_override = dict(a=0.61, a_f=1.56, b=7.5, b_f=35.31, a_s=0.7, b_s=33.24, a_fs=0.46, b_fs=5.09)
+
+# material_params_override = dict(a=0.059, a_f=18.471, b=8.023, b_f=16.026, a_s=2.184, b_s=11.12, a_fs=0.216, b_fs=11.436)
+material_params_override = dict(
+    a=2.0, a_f=0.0, b=8.0, b_f=0.0,
+    a_s=0.0, b_s=0.0, a_fs=0.0, b_fs=0.0,
+)
 # ── 4. Spatial fields ────────────────────────────────────────────────────
+node_coords = pd.read_csv(MESH_DIR + "/rodero_05_fine_xyz.csv", header=None).to_numpy() * 10.0
 ct_values = load_dense_node_field(MESH_DIR + "rodero_05_fine_nodefield_cell-type.csv")
 cell_fn = map_dense_field_to_dg0_function(biv_geo.ep_mesh, node_coords, ct_values, {1: 0, 2: 2, 3: 1})
 iks_values = load_dense_node_field(MESH_DIR + "rodero_05_fine_nodefield_sf_IKs.csv")
 iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
 
 # ── 5. EM coupling ───────────────────────────────────────────────────────
-VALVE_STIFFNESS_SCALE = 3.0
+VALVE_STIFFNESS_SCALE = 1.0 #  3.0
 logger.info("" + "=" * 60)
 logger.info("RUN PARAMETERS")
 logger.info("=" * 60)
@@ -203,6 +237,77 @@ coupling = em_model.setup_EM_model_from_config(
     valve_stiffness_scale=VALVE_STIFFNESS_SCALE,
 )
 mech_problem = coupling.mech_solver
+mech_problem.solver.parameters["relative_tolerance"] = 1e-8   # was 1e-5
+mech_problem.solver.parameters["absolute_tolerance"] = 1e-8
+mech_problem.solver.parameters["linear_solver"] = "mumps"
+mech_problem.solver.parameters["preconditioner"] = "lu"
+logger.info(f"  [solver check] right after setting: linear_solver={mech_problem.solver.parameters['linear_solver']}, "
+            f"preconditioner={mech_problem.solver.parameters['preconditioner']}")
+# coupling.mech_solver.material.active._parameters["Tref"] = 0.0  # kill active tension entirely —
+                                                                    # isolates whether Ta<->lambda
+                                                                    # feedback is the source of chaos
+
+# ── Constrain rigid-body motion ────────────────────────────────────────
+# With only a Robin spring (normal-only) on EPI and a free BASE, nothing
+# resists tangential/rotational motion at all. A single apex pin removes
+# rigid TRANSLATION but not rigid ROTATION about that point — pin a
+# second point too, with only ONE component constrained there, to fix
+# rotation without over-constraining the mesh.
+mesh_ = biv_geo.mechanics_mesh
+mesh_.init(2, 0)
+ffun_arr_ = biv_geo.ffun.array()
+epi_marker_val = biv_geo.markers["EPI"][0]
+base_marker_val = biv_geo.markers["BASE"][0]
+
+epi_vertex_ids = set()
+base_vertex_ids = set()
+conn20 = mesh_.topology()(2, 0)
+for fidx in range(mesh_.num_entities(2)):
+    if ffun_arr_[fidx] == epi_marker_val:
+        epi_vertex_ids.update(conn20(fidx))
+    elif ffun_arr_[fidx] == base_marker_val:
+        base_vertex_ids.update(conn20(fidx))
+
+coords_ = mesh_.coordinates()
+base_centroid = coords_[list(base_vertex_ids)].mean(axis=0)
+epi_coords = coords_[list(epi_vertex_ids)]
+dists = np.linalg.norm(epi_coords - base_centroid, axis=1)
+apex_vertex_local = list(epi_vertex_ids)[int(np.argmax(dists))]
+apex_point = coords_[apex_vertex_local]
+
+# Second point: farthest EPI vertex from the apex, for the anti-rotation pin
+dists_from_apex = np.linalg.norm(epi_coords - apex_point, axis=1)
+second_vertex_local = list(epi_vertex_ids)[int(np.argmax(dists_from_apex))]
+second_point = coords_[second_vertex_local]
+
+logger.info(f"Apex pin at {apex_point} (full 3-component), "
+            f"anti-rotation pin at {second_point} (1 component)")
+
+
+def _apex_dirichlet_bc(W):
+    class ApexPoint(dolfin.SubDomain):
+        def inside(self, x, on_boundary):
+            return (dolfin.near(x[0], apex_point[0], 1e-6)
+                    and dolfin.near(x[1], apex_point[1], 1e-6)
+                    and dolfin.near(x[2], apex_point[2], 1e-6))
+
+    class SecondPoint(dolfin.SubDomain):
+        def inside(self, x, on_boundary):
+            return (dolfin.near(x[0], second_point[0], 1e-6)
+                    and dolfin.near(x[1], second_point[1], 1e-6)
+                    and dolfin.near(x[2], second_point[2], 1e-6))
+
+    V = W.sub(0)
+    return [
+        dolfin.DirichletBC(V, dolfin.Constant((0.0, 0.0, 0.0)), ApexPoint(), method="pointwise"),
+        dolfin.DirichletBC(V.sub(1), dolfin.Constant(0.0), SecondPoint(), method="pointwise"),
+    ]
+
+
+mech_problem.bcs.dirichlet = list(mech_problem.bcs.dirichlet) + [_apex_dirichlet_bc]
+mech_problem._set_dirichlet_bc()
+mech_problem._init_solver()
+logger.info("Apex + anti-rotation pins applied; solver rebuilt.")
 
 state_names = list(TorLandFull.default_initial_conditions().keys())
 apply_celltype_aware_initial_conditions(coupling, cell_fn, steady_state["cell_init_files"], state_names)

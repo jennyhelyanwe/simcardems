@@ -271,6 +271,21 @@ class EMCoupling(BaseEMCoupling):
         )
         self.mech_solver.solver.register_datacollector(collector)
 
+        # Strain/stress diagnostic export — same space as Ta_current,
+        # same registration call, so it inherits the exact same
+        # proven-safe timing as everything else here.
+        shared_V = self.mech_solver.material.active.Ta_current.function_space()
+        self._E_components = [dolfin.Function(shared_V, name=f"E_strain_{i}{j}")
+                              for i in range(3) for j in range(3)]
+        self._P_components = [dolfin.Function(shared_V, name=f"P_stress_{i}{j}")
+                              for i in range(3) for j in range(3)]
+        for idx, fn in enumerate(self._E_components):
+            collector.register("mechanics", f"E_strain_{idx}", fn)
+        for idx, fn in enumerate(self._P_components):
+            collector.register("mechanics", f"P_stress_{idx}", fn)
+
+        self.mech_solver.solver.register_datacollector(collector)
+
     def save_state(
         self,
         path: Union[str, Path],
