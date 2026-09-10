@@ -20,17 +20,19 @@ from cavity_mechanics import get_u_view, _cheap_ta_now, solve_cavity_with_ta_ram
 logger = utils.getLogger(__name__)
 
 
-def dt_targets_for_phase(phase):
-    if phase == Phase.PRELOAD:
-        return dict(dt=1.0, dt_mech=10.0)
+def dt_targets_for_phase(phase, t_ms):
+    if (phase == Phase.PRELOAD) & (t_ms < 10):
+        return dict(dt=1.0, dt_mech=1.0)
+    elif (phase == Phase.PRELOAD) & (t_ms >= 10):
+        return dict(dt=1.0, dt_mech=5.0)
     elif phase == Phase.EJECTION:
         return dict(dt=0.1, dt_mech=2.0)
     else:  # ISOVOL_CONTRACTION, ISOVOL_RELAXATION, FILLING
         return dict(dt=0.05, dt_mech=0.1)
 
 
-def apply_phase_dt(config, phase, time_stepper=None, logger=None):
-    targets = dt_targets_for_phase(phase)
+def apply_phase_dt(config, phase, t_ms, time_stepper=None, logger=None):
+    targets = dt_targets_for_phase(phase, t_ms)
     changed = (config.dt != targets["dt"]) or (config.dt_mech != targets["dt_mech"])
     if changed and logger is not None:
         logger.info(f"dt update (phase={phase}): dt {config.dt} -> {targets['dt']}, "
@@ -293,9 +295,9 @@ class BiVCycleRunner(Runner):
             logger.info(f"  [dual-cavity] RV pressure-driven: v_rv_now={v_rv_now:.1f}, "
                         f"p_rv_target={p_rv_target:.4f} kPa (Neumann BC mode)")
 
-        logger.info(
-            f"  [solver check] right before solve: linear_solver={active_problem.solver.parameters['linear_solver']}, "
-            f"preconditioner={active_problem.solver.parameters['preconditioner']}")
+        # logger.info(
+        #     f"  [solver check] right before solve: linear_solver={active_problem.solver.parameters['linear_solver']}, "
+        #     f"preconditioner={active_problem.solver.parameters['preconditioner']}")
 
         if lv_isovol or rv_isovol:
             n_substeps, active_problem = solve_cavity_with_ta_ramp(self._cavity_manager, lv_isovol, rv_isovol,
@@ -305,11 +307,8 @@ class BiVCycleRunner(Runner):
             active_problem.solve()
             logger.info(f"  [dual-cavity] plain pressure-driven solve done")
 
-        # if not getattr(self, '_detF_checked_once', False):
-        self._check_detF_full_mesh(active_problem)
-            # self._detF_checked_once = True
-
-        self._export_strain_stress(active_problem)
+        # self._check_detF_full_mesh(active_problem)
+        # self._export_strain_stress(active_problem)
 
         self._last_solved_ta_max, last_ta_min = _cheap_ta_now(self._mech_problem)
         logger.info(f"  [dual-cavity] post-solve Ta range: min={last_ta_min:.4f}, max={self._last_solved_ta_max:.4f}")
@@ -345,49 +344,10 @@ class BiVCycleRunner(Runner):
                         f"(pressure_n={rv_state.pressure_n:.4f}, wdk_pressure_n={rv_state.wdk_pressure_n:.4f})")
 
         self.coupling.update_prev_mechanics()
-        import numpy as np
-        # ── One-time diagnostic: lambda at test points, BEFORE and AFTER interpolate() ──
-        active = active_problem.material.active
-        V_mech = active.lmbda.function_space()
-        V_ep = self.coupling.lmbda_ep.function_space()
-        coords_mech_all = V_mech.tabulate_dof_coordinates()
-        coords_ep_all = V_ep.tabulate_dof_coordinates()
-
-        test_points = [
-            np.array([80.0, 60.0, 50.0]),  # near where mech_lambda's chaotic peak showed up
-            np.array([100.0, 40.0, 20.0]),  # apex-ish region
-            np.array([60.0, 70.0, 30.0]),  # base-ish region
-            np.array([90.0, 55.0, 65.0]),  # arbitrary interior point
-        ]
-
-        def _nearest(coords_all, pt):
-            idx = int(np.argmin(np.linalg.norm(coords_all - pt, axis=1)))
-            return idx, coords_all[idx]
-
-        logger.info("  [lambda transfer check] BEFORE interpolate():")
-        for pt in test_points:
-            idx_m, real_m = _nearest(coords_mech_all, pt)
-            idx_e, real_e = _nearest(coords_ep_all, pt)
-            val_m = active.lmbda.vector().get_local()[idx_m]
-            val_e = self.coupling.lmbda_ep.vector().get_local()[idx_e]
-            logger.info(f"    target={pt}: mech@{real_m}={val_m:.4f}  |  ep@{real_e}={val_e:.4f}")
-
         self.coupling.mechanics_to_coupling()
-        self._export_lambda_diff(active_problem)
-        self._trace_cell_lambda(active_problem, label="after mechanics_to_coupling")
-
-        logger.info("  [lambda transfer check] AFTER interpolate():")
-        for pt in test_points:
-            idx_m, real_m = _nearest(coords_mech_all, pt)
-            idx_e, real_e = _nearest(coords_ep_all, pt)
-            val_m = active.lmbda.vector().get_local()[idx_m]
-            val_e = self.coupling.lmbda_ep.vector().get_local()[idx_e]
-            logger.info(f"    target={pt}: mech@{real_m}={val_m:.4f}  |  ep@{real_e}={val_e:.4f}")
-
-        # self.coupling.mechanics_to_coupling()
         self.coupling.coupling_to_ep()
 
-        apply_phase_dt(self._config, lv_state.phase, time_stepper=self._time_stepper, logger=logger)
+        apply_phase_dt(self._config, lv_state.phase, t_ms, time_stepper=self._time_stepper, logger=logger)
 
         t1 = time.time()
         logger.debug(f"  Mechanics solve time: {t1 - t0:.2f}s")

@@ -70,7 +70,7 @@ logger.info(f"RUN_MODE = {RUN_MODE} (NUM_REFINEMENTS={NUM_REFINEMENTS}, UNIFORM_
 RESOLUTION = "4mm"
 MESH_DIR = "meshes/"
 RUN_TAG = os.environ.get("RUN_TAG", "default")
-RESULTS_DIR = f"results_{RESOLUTION}/{RUN_TAG}/"
+RESULTS_DIR = f"results_novalve_{RESOLUTION}/{RUN_TAG}/"
 
 # ── Warm start configuration ─────────────────────────────────────────────
 WARM_START_T_MS = None #   # e.g. 100.0 to restart from t=100ms, or None for fresh start
@@ -78,10 +78,10 @@ WARM_START_T_MS = None #   # e.g. 100.0 to restart from t=100ms, or None for fre
 
 # ── 1. Geometry ───────────────────────────────────────────────────────────
 logger.info('Build geometry...')
-geo = Geometry.from_file(MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5")
+geo = Geometry.from_file(MESH_DIR + "rodero_05_coarse_novalve_" + RESOLUTION + ".h5")
 
 mesh = dolfin.Mesh()
-with dolfin.HDF5File(mesh.mpi_comm(), MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5", "r") as f:
+with dolfin.HDF5File(mesh.mpi_comm(), MESH_DIR + "rodero_05_coarse_novalve_" + RESOLUTION + ".h5", "r") as f:
     f.read(mesh, "mesh", False)
 coords = mesh.coordinates()
 cells_arr = mesh.cells()
@@ -108,7 +108,7 @@ else:
 logger.info(f"EP Mesh vertices: {biv_geo.ep_mesh.num_vertices()}")
 logger.info(f"Mechanics Mesh vertices: {biv_geo.mechanics_mesh.num_vertices()}")
 
-coarse_tv = np.load(MESH_DIR + '/rodero_05_coarse_' + RESOLUTION + '_tv.npy')
+coarse_tv = np.load(MESH_DIR + '/rodero_05_coarse_novalve_' + RESOLUTION + '_tv.npy')
 is_valve_float = (coarse_tv >= 7).astype(float)
 coarse_centres_all = np.array([cell.midpoint().array() for cell in dolfin.cells(biv_geo.mechanics_mesh)])
 valve_fn = map_dense_field_to_ep_mesh(biv_geo.mechanics_mesh, coarse_centres_all, is_valve_float)
@@ -167,14 +167,14 @@ cell_init_file = steady_state["cell_init_files"][0]
 config = Config()
 config.cell_init_file = cell_init_file
 config.T = 800.0
-config.dt = 10.0
-config.dt_mech = 10.0
-config.geometry_path = MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5"
+config.dt = 1.0
+config.dt_mech = 2.0
+config.geometry_path = MESH_DIR + "rodero_05_coarse_novalve_" + RESOLUTION + ".h5"
 config.outdir = RESULTS_DIR + "biv_coarse_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
 config.save_freq = 10
 config.linear_mechanics_solver = "mumps"
-config.spring = 500.0
+config.spring = 5.0
 config.traction = 0.005
 config.mechanics_use_custom_newton_solver = True
 config.mechanics_solve_strategy = "fixed"
@@ -200,7 +200,7 @@ iks_values = load_dense_node_field(MESH_DIR + "rodero_05_fine_nodefield_sf_IKs.c
 iks_fn = map_dense_field_to_ep_mesh(biv_geo.ep_mesh, node_coords, iks_values)
 
 # ── 5. EM coupling ───────────────────────────────────────────────────────
-VALVE_STIFFNESS_SCALE = 3.0 #  3.0
+VALVE_STIFFNESS_SCALE = 6.0 #  3.0
 logger.info("" + "=" * 60)
 logger.info("RUN PARAMETERS")
 logger.info("=" * 60)
