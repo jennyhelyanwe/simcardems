@@ -212,8 +212,9 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
                     stiffness_scale * self.material.strain_energy(self._F)
                     + self.material.compressibility(p, self._J)
             )
+            print('what does compressibility return:', self.material.compressibility(p, self._J))
         else:
-            internal_energy = self.material.strain_energy(self._F) + self.material.compressibility(p, self._J)
+            internal_energy = self.material.strain_energy(self._F)  + self.material.compressibility(p, self._J)
         #
         # kappa = dolfin.Constant(500.0)  # bulk modulus (kPa), nearly-incompressible penalty
         # internal_energy = self.material.strain_energy(
@@ -239,12 +240,33 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
                 Pa_frozen = myocardium * self.material.active.Ta_current * dolfin.outer(f, f0)
             else:
                 Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
-            # Pa_frozen = self.material.active.Ta_current * dolfin.outer(f, f0)
-            # print('Pa_frozen', Pa_frozen)
-            # print('Ta(lmbda):' , self.material.active.Ta(lmbda))
-            # print('lmbda: ', lmbda)
             self._virtual_work += dolfin.inner(Pa_frozen, dolfin.grad(v)) * dx
-            # print('virtual work add: ', dolfin.inner(Pa_frozen, dolfin.grad(v)) * dx)
+
+            # ── Diagnostic: is myocardium/Pa_frozen actually doing what's expected? ──
+            myocardium_check = dolfin.project(myocardium, valve_mask.function_space())
+            myo_vals = myocardium_check.vector().get_local()
+            n_myo_nonzero = int((myo_vals > 1e-9).sum())
+
+            Pa_frozen_mag = dolfin.sqrt(dolfin.inner(Pa_frozen, Pa_frozen))
+            Pa_frozen_check = dolfin.project(Pa_frozen_mag, self.material.active.Ta_current.function_space())
+            pa_vals = Pa_frozen_check.vector().get_local()
+            n_pa_nonzero = int((pa_vals > 1e-9).sum())
+
+            logger.info(f"  [myocardium/Pa_frozen check] myocardium: n_nonzero={n_myo_nonzero}/{len(myo_vals)}, "
+                        f"min={myo_vals.min():.4f}, max={myo_vals.max():.4f}")
+            logger.info(f"  [myocardium/Pa_frozen check] Pa_frozen magnitude: n_nonzero={n_pa_nonzero}/{len(pa_vals)}, "
+                        f"max={pa_vals.max():.6e}")
+            self.material.active._projector.project(self.material.active.Ta_current, self.material.active.Ta(lmbda))
+            ta_check_vals = self.material.active.Ta_current.vector().get_local()
+            logger.info(
+                f"  [Ta_current post-update check] n_nonzero={(ta_check_vals > 1e-9).sum()}/{len(ta_check_vals)}, "
+                f"max={ta_check_vals.max():.6e}")
+        # if self.strong_coupling:
+        #     f0 = self.material.active.f0
+        #     f = self._F * f0
+        #     lmbda = dolfin.sqrt(f ** 2)
+        #     Pa = self.material.active.Ta(lmbda) * dolfin.outer(f, f0)
+        #     self._virtual_work += dolfin.inner(Pa, dolfin.grad(v)) * dx
 
         external_work = self._external_work(u, v)
         if external_work is not None:
@@ -256,8 +278,7 @@ class MechanicsProblem(ContinuationBasedMechanicsProblem):
             self.state,
             dolfin.TrialFunction(self.state_space),
         )
-        # print('jacobian', self._jacobian)
-        # quit()
+
         if init_solver:
             self._init_solver()
 

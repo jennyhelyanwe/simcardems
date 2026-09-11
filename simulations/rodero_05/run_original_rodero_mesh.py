@@ -113,7 +113,7 @@ logger.info(f"Mechanics Mesh vertices: {biv_geo.mechanics_mesh.num_vertices()}")
 # Delineate different materials for assigning conduction velocity, stiffness, and contractility.
 # coarse_tv = np.load(MESH_DIR + '/rodero_05_' + RESOLUTION + '_tv.npy')
 tv = pd.read_csv(
-    MESH_DIR + '/rodero_05_fine/rodero_05_fine_elementfield_tv-element.csv', header=None
+    MESH_DIR + '/rodero_05_fine_elementfield_tv-element.csv', header=None
 ).to_numpy().flatten().astype(int)
 is_valve_float = (tv >= 7).astype(float) # Isolate valve plug elements
 coarse_centres_all = np.array([cell.midpoint().array() for cell in dolfin.cells(biv_geo.mechanics_mesh)])
