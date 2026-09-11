@@ -68,7 +68,7 @@ NUM_REFINEMENTS = 3 if RUN_MODE == "archer2" else 0
 UNIFORM_ACTIVATION_TEST = (RUN_MODE == "local")
 logger.info(f"RUN_MODE = {RUN_MODE} (NUM_REFINEMENTS={NUM_REFINEMENTS}, UNIFORM_ACTIVATION_TEST={UNIFORM_ACTIVATION_TEST})")
 
-RESOLUTION = "1mm"
+RESOLUTION = "fine"
 MESH_DIR = "meshes/"
 RUN_TAG = os.environ.get("RUN_TAG", "default")
 RESULTS_DIR = f"results_{RESOLUTION}/{RUN_TAG}/"
@@ -79,10 +79,10 @@ WARM_START_T_MS = None #   # e.g. 100.0 to restart from t=100ms, or None for fre
 
 # ── 1. Geometry ───────────────────────────────────────────────────────────
 logger.info('Build geometry...')
-geo = Geometry.from_file(MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5")
+geo = Geometry.from_file(MESH_DIR + "rodero_05_" + RESOLUTION + ".h5")
 
 mesh = dolfin.Mesh()
-with dolfin.HDF5File(mesh.mpi_comm(), MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5", "r") as f:
+with dolfin.HDF5File(mesh.mpi_comm(), MESH_DIR + "rodero_05_" + RESOLUTION + ".h5", "r") as f:
     f.read(mesh, "mesh", False)
 coords = mesh.coordinates()
 cells_arr = mesh.cells()
@@ -111,8 +111,11 @@ logger.info(f"EP Mesh vertices: {biv_geo.ep_mesh.num_vertices()}")
 logger.info(f"Mechanics Mesh vertices: {biv_geo.mechanics_mesh.num_vertices()}")
 
 # Delineate different materials for assigning conduction velocity, stiffness, and contractility.
-coarse_tv = np.load(MESH_DIR + '/rodero_05_coarse_' + RESOLUTION + '_tv.npy')
-is_valve_float = (coarse_tv >= 7).astype(float) # Isolate valve plug elements
+# coarse_tv = np.load(MESH_DIR + '/rodero_05_' + RESOLUTION + '_tv.npy')
+tv = pd.read_csv(
+    MESH_DIR + '/rodero_05_fine/rodero_05_fine_elementfield_tv-element.csv', header=None
+).to_numpy().flatten().astype(int)
+is_valve_float = (tv >= 7).astype(float) # Isolate valve plug elements
 coarse_centres_all = np.array([cell.midpoint().array() for cell in dolfin.cells(biv_geo.mechanics_mesh)])
 valve_fn = map_dense_field_to_ep_mesh(biv_geo.mechanics_mesh, coarse_centres_all, is_valve_float)
 biv_geo.valve_mask = valve_fn
@@ -173,7 +176,7 @@ config.cell_init_file = cell_init_file
 config.T = 800.0
 config.dt = 10.0
 config.dt_mech = 10.0
-config.geometry_path = MESH_DIR + "rodero_05_coarse_" + RESOLUTION + ".h5"
+config.geometry_path = MESH_DIR + "rodero_05_" + RESOLUTION + ".h5"
 config.outdir = RESULTS_DIR + "biv_coarse_run_output"
 config.coupling_type = "fully_coupled_Tor_Land"
 config.save_freq = 10
